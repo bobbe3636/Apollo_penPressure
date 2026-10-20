@@ -13,11 +13,16 @@
  *   with, a real Cintiq on the same PC. Descriptors from the public linuxwacom recording.
  * - Cintiq 22: a pen display, captured from the real device. Wacom ties it to one monitor
  *   (or All displays) and pairs it with a real Cintiq 22's screen if there is one.
+ * - Huion Kamvas 20: for a PC with the Huion driver instead of Wacom's (chosen automatically),
+ *   captured from a real one. The Huion driver reads its hidden strings (201 firmware, 200
+ *   parameters), which switches it to Huion's own reports; without that driver it is a standard
+ *   HID pen (Windows Ink, 8192 levels).
  */
 // platform includes
 #include <winsock2.h>  // must precede Windows.h
 #include <ws2tcpip.h>
 #include <Windows.h>
+#include <tlhelp32.h>
 
 // standard includes
 #include <algorithm>
@@ -41,6 +46,7 @@
 #include "src/logging.h"
 #include "virtual_tablet.h"
 #include "virtual_tablet_descriptors.h"
+#include "virtual_tablet_descriptors_huion.h"
 #include "virtual_tablet_descriptors_intuos.h"
 
 namespace platf::virtual_tablet {
@@ -72,6 +78,10 @@ namespace platf::virtual_tablet {
     constexpr int IPM_X_MAX = 52600, IPM_Y_MAX = 29600, IPM_P_MAX = 8191, IPM_DIST_MAX = 255, IPM_MARGIN = 397;
     constexpr int IPM_X_MAX_GENERIC = 26300, IPM_Y_MAX_GENERIC = 14800, IPM_P_MAX_GENERIC = 4095;
     constexpr const char *IPM_SERIAL = "4HHS1K1000713";
+    // Huion Kamvas 20: Huion's report 0x08 (the ranges its string 200 gives the driver), and the
+    // standard HID pen report 0x0A it sends until the Huion driver reads that string
+    constexpr int HUION_X_MAX = 86970, HUION_Y_MAX = 47752, HUION_P_MAX = 8191, HUION_TILT_MAX = 60;
+    constexpr int HUION_X_MAX_GENERIC = 32767, HUION_Y_MAX_GENERIC = 32767;
     constexpr uint8_t PEN_BUTTON_TERTIARY = 0x04;  // LI_PEN_BUTTON_TERTIARY
     constexpr size_t MAX_QUEUED_REPORTS = 16;  // motion is merged, so this only holds state changes
 
@@ -339,6 +349,71 @@ namespace platf::virtual_tablet {
         put16le(r, in_range ? (tool == LI_TOOL_TYPE_ERASER ? TOOL_PRO_PEN2_ERASER : TOOL_PRO_PEN2) : 0);
         return r;
       }
+
+      // ---------------------------------------------------------- Huion Kamvas 20
+      /**
+       * Huion's report 0x08, 12 bytes: 0x80 | tip, barrel 1 (0x02), barrel 2 (0x04); X and Y in
+       * 24 bits, their high bytes after the pressure; tilt, Y flipped. It has no in-range bit:
+       * the pen leaving is the reports stopping (none out of range). The pen has no eraser.
+       */
+      std::vector<uint8_t> huion_report08() const {
+        if (!in_range) {
+          return {};
+        }
+        uint32_t hx = (uint32_t) (x * HUION_X_MAX), hy = (uint32_t) (y * HUION_Y_MAX);
+        uint8_t f = 0x80;
+        if (tip) {
+          f |= 0x01;
+        }
+        if (buttons & LI_PEN_BUTTON_PRIMARY) {
+          f |= 0x02;
+        }
+        if (buttons & LI_PEN_BUTTON_SECONDARY) {
+          f |= 0x04;
+        }
+        std::vector<uint8_t> r;
+        put8(r, 0x08);
+        put8(r, f);
+        put16le(r, (uint16_t) hx);
+        put16le(r, (uint16_t) hy);
+        put16le(r, tip ? (uint16_t) (pressure * HUION_P_MAX) : 0);
+        put8(r, (uint8_t) (hx >> 16));
+        put8(r, (uint8_t) (hy >> 16));
+        put8(r, (uint8_t) (int8_t) std::clamp(tilt_x, -HUION_TILT_MAX, HUION_TILT_MAX));
+        put8(r, (uint8_t) (int8_t) std::clamp(-tilt_y, -HUION_TILT_MAX, HUION_TILT_MAX));
+        return r;
+      }
+
+      /// The standard HID pen report 0x0A (Windows' own pen, before the Huion driver takes over)
+      std::vector<uint8_t> huion_report0a() const {
+        uint8_t f = 0;
+        if (in_range) {
+          f |= 0x40;  // in range
+          if (tool == LI_TOOL_TYPE_ERASER) {
+            f |= 0x08;  // invert
+            if (tip) {
+              f |= 0x04;  // eraser
+            }
+          } else if (tip) {
+            f |= 0x01;  // tip
+          }
+          if (buttons & LI_PEN_BUTTON_PRIMARY) {
+            f |= 0x02;  // barrel
+          }
+          if (buttons & LI_PEN_BUTTON_SECONDARY) {
+            f |= 0x10;  // secondary tip: Huion's second button
+          }
+        }
+        std::vector<uint8_t> r;
+        put8(r, 0x0A);
+        put8(r, f);
+        put16le(r, (uint16_t) (x * HUION_X_MAX_GENERIC));
+        put16le(r, (uint16_t) (y * HUION_Y_MAX_GENERIC));
+        put16le(r, tip ? (uint16_t) (pressure * HUION_P_MAX) : 0);
+        put8(r, (uint8_t) (int8_t) std::clamp(tilt_x, -HUION_TILT_MAX, HUION_TILT_MAX));
+        put8(r, (uint8_t) (int8_t) std::clamp(tilt_y, -HUION_TILT_MAX, HUION_TILT_MAX));
+        return r;
+      }
     };
 
     // ---------------------------------------------------------------- shared state
@@ -352,6 +427,7 @@ namespace platf::virtual_tablet {
       SOCKET sock = INVALID_SOCKET;
       std::mutex send_mutex;
       std::deque<urb_t> pending_in;  // interrupt-IN URBs waiting for a report (guarded by g_mutex)
+      std::deque<urb_t> pending_ep2;  // the Huion's pen interface (endpoint 2), until its driver takes over
       std::deque<urb_t> pending_other;  // IN URBs on other endpoints: never completed, until unlinked
       bool alive = true;  // guarded by g_mutex
     };
@@ -363,9 +439,24 @@ namespace platf::virtual_tablet {
     std::shared_ptr<session_t> g_session;
     uint8_t g_data_mode = 1;
     std::map<uint8_t, std::vector<uint8_t>> g_features;
-    bool g_intuos = true;  ///< Intuos Pro M (default) or Cintiq 22, from config at start()
+    // The model plugged in: chosen from pen_virtual_tablet_model ("auto": the Wacom driver's
+    // Intuos Pro M, or a Huion Kamvas 20 on a PC with the Huion driver) each time it is plugged in
+    enum class model_e {
+      intuos,
+      cintiq,
+      huion
+    };
+    bool g_intuos = true;  ///< Intuos Pro M
+    bool g_huion = false;  ///< Huion Kamvas 20 (neither: Cintiq 22)
+    bool g_huion_mode = false;  ///< The Huion driver read string 200: Huion's reports on endpoint 1
+    std::atomic<model_e> g_wanted_model {model_e::intuos};  ///< What available() last found
     uint16_t g_report_seq = 0;
     std::thread g_battery_thread;
+
+    void set_model_locked(model_e m) {
+      g_intuos = m == model_e::intuos;
+      g_huion = m == model_e::huion;
+    }
 
     // The model's descriptors
     struct model_t {
@@ -382,6 +473,11 @@ namespace platf::virtual_tablet {
     };
 
     model_t model() {
+      if (g_huion) {
+        namespace d = descriptors_huion;
+        return {d::device, sizeof(d::device), d::config, sizeof(d::config), nullptr, 0, d::string_product,
+                sizeof(d::string_product), "", "Huion Kamvas 20"};
+      }
       if (g_intuos) {
         namespace d = descriptors_intuos;
         return {d::device, sizeof(d::device), d::config, sizeof(d::config), d::string_manufacturer, sizeof(d::string_manufacturer),
@@ -394,6 +490,13 @@ namespace platf::virtual_tablet {
 
     /// The HID report descriptor of an interface (nullptr: none)
     const uint8_t *hid_report_descriptor(uint16_t iface, size_t &size) {
+      if (g_huion) {
+        if (iface > 1) {
+          return nullptr;
+        }
+        size = iface == 0 ? sizeof(descriptors_huion::hid_report_if0) : sizeof(descriptors_huion::hid_report_if1);
+        return iface == 0 ? descriptors_huion::hid_report_if0 : descriptors_huion::hid_report_if1;
+      }
       if (g_intuos) {
         if (iface == 0) {
           size = sizeof(descriptors_intuos::hid_report_if0);
@@ -428,6 +531,12 @@ namespace platf::virtual_tablet {
     }
 
     void reset_features() {
+      g_huion_mode = false;
+      if (g_huion) {
+        g_features.clear();  // the Huion has no feature reports
+        g_data_mode = 1;
+        return;
+      }
       const char *serial = model().serial;
       std::vector<uint8_t> serial_report {0x14};
       for (size_t i = 0; i < 13; i++) {
@@ -501,6 +610,9 @@ namespace platf::virtual_tablet {
 
     /// The pen report for the mode the Wacom driver put the tablet in (caller holds g_mutex)
     std::vector<uint8_t> current_report_locked() {
+      if (g_huion) {
+        return g_huion_mode ? g_pen.huion_report08() : g_pen.huion_report0a();
+      }
       if (g_intuos) {
         g_report_seq++;
         return g_data_mode == 2 ? g_pen.report30(scan_time_now(), g_report_seq) : g_pen.report06_ipm(scan_time_now(), g_report_seq);
@@ -522,6 +634,9 @@ namespace platf::virtual_tablet {
 
     void queue_report_locked() {
       auto report = current_report_locked();
+      if (report.empty()) {
+        return;  // the Huion's pen out of range: its reports just stop
+      }
 
       // If the host fell behind, the newest position is all that matters: replace a queued
       // report that differs only in motion (same report ID and tip/button/eraser/range flags)
@@ -591,6 +706,34 @@ namespace platf::virtual_tablet {
                 if (index == 0) {
                   return reply(langids, sizeof(langids));
                 }
+                if (g_huion) {
+                  namespace d = descriptors_huion;
+                  switch (index) {
+                    case 6:
+                      return reply(d::string_product, sizeof(d::string_product));
+                    case 123:
+                      return reply(d::string_123, sizeof(d::string_123));
+                    case 200:
+                      {
+                        // The Huion driver reads its parameters: from now on the real tablet
+                        // sends Huion's own reports on interface 0
+                        std::lock_guard lg(g_mutex);
+                        if (!g_huion_mode) {
+                          g_huion_mode = true;
+                          g_reports.clear();
+                          g_cv.notify_all();
+                          BOOST_LOG(info) << "Virtual tablet: the Huion driver took over the tablet"sv;
+                        }
+                        return reply(d::string_params, sizeof(d::string_params));
+                      }
+                    case 201:
+                      return reply(d::string_firmware, sizeof(d::string_firmware));
+                    case 202:
+                      return reply(d::string_maker, sizeof(d::string_maker));
+                    default:
+                      return EPIPE_STATUS;  // as the real one, which has no manufacturer string
+                  }
+                }
                 if (index == 1) {
                   return reply(m.manufacturer, m.manufacturer_size);
                 }
@@ -604,10 +747,10 @@ namespace platf::virtual_tablet {
               }
               return EPIPE_STATUS;  // qualifier, BOS, MS OS descriptors: a full-speed device has none
             }
-          case 0:  // GET_STATUS: self-powered, as captured
+          case 0:  // GET_STATUS: self-powered, as captured (the Huion: bus powered)
             {
-              static const uint8_t status[] = {0x01, 0x00};
-              return reply(status, sizeof(status));
+              static const uint8_t status[] = {0x01, 0x00}, bus_powered[] = {0x00, 0x00};
+              return g_huion ? reply(bus_powered, sizeof(bus_powered)) : reply(status, sizeof(status));
             }
           case 8:  // GET_CONFIGURATION
             {
@@ -657,6 +800,9 @@ namespace platf::virtual_tablet {
               if (report_id == 0x83) {
                 return EPIPE_STATUS;  // the inbox pen stack's probe; the real tablet stalls it
               }
+              if (g_huion) {
+                return 0;
+              }
               std::lock_guard lg(g_mutex);
               if (report_id == 0x02 && out.size() >= 2) {
                 if (g_data_mode != out[1]) {
@@ -690,7 +836,9 @@ namespace platf::virtual_tablet {
               }
               if (report_type == 1) {
                 std::vector<uint8_t> r;
-                if (g_intuos) {
+                if (g_huion) {
+                  r = report_id == 0x08 ? g_pen.huion_report08() : std::vector<uint8_t> {};
+                } else if (g_intuos) {
                   if (report_id == 0x1E) {
                     r = g_pen.report30(scan_time_now(), g_report_seq);
                   } else if (report_id == 0x06) {
@@ -762,27 +910,42 @@ namespace platf::virtual_tablet {
     }
 
     void report_pump(std::shared_ptr<session_t> s) {
+      // The Huion's standard pen reports go on endpoint 2 until its driver takes over
+      auto pending = [&]() -> std::deque<urb_t> & {
+        return g_huion && !g_huion_mode ? s->pending_ep2 : s->pending_in;
+      };
       while (true) {
         urb_t urb;
+        uint32_t ep;
         std::vector<uint8_t> report;
         {
           std::unique_lock lk(g_mutex);
-          g_cv.wait(lk, [&] {
-            return !s->alive || (!s->pending_in.empty() && !g_reports.empty());
+          bool ready = g_cv.wait_for(lk, 15ms, [&] {
+            return !s->alive || (!pending().empty() && !g_reports.empty());
           });
           if (!s->alive) {
             return;
           }
-          urb = s->pending_in.front();
-          s->pending_in.pop_front();
-          report = std::move(g_reports.front());
-          g_reports.pop_front();
+          if (!ready) {
+            // A real Huion keeps reporting while the pen is in range, and its driver takes a pause
+            // as the pen leaving: repeat the pen's state while nothing new comes
+            if (!g_huion || !g_huion_mode || !g_pen.in_range || pending().empty()) {
+              continue;
+            }
+            report = current_report_locked();
+          } else {
+            report = std::move(g_reports.front());
+            g_reports.pop_front();
+          }
+          ep = &pending() == &s->pending_ep2 ? 2 : 1;
+          urb = pending().front();
+          pending().pop_front();
           g_stats.delivered++;
         }
         if (report.size() > urb.buflen) {
           report.resize(urb.buflen);
         }
-        send_ret_submit(*s, urb.seqnum, urb.devid, DIR_IN, 1, 0, report);
+        send_ret_submit(*s, urb.seqnum, urb.devid, DIR_IN, ep, 0, report);
       }
     }
 
@@ -813,6 +976,10 @@ namespace platf::virtual_tablet {
             std::lock_guard lg(g_mutex);
             s->pending_in.push_back({seqnum, devid, buflen});
             g_cv.notify_all();
+          } else if (g_huion && ep == 2 && direction == DIR_IN) {
+            std::lock_guard lg(g_mutex);
+            s->pending_ep2.push_back({seqnum, devid, buflen});
+            g_cv.notify_all();
           } else if (g_intuos && direction == DIR_IN) {
             // The Intuos Pro's second HID interface: nothing to report, the URB waits until unlinked
             std::lock_guard lg(g_mutex);
@@ -827,7 +994,7 @@ namespace platf::virtual_tablet {
           int32_t status = 0;
           {
             std::lock_guard lg(g_mutex);
-            for (auto *pending : {&s->pending_in, &s->pending_other}) {
+            for (auto *pending : {&s->pending_in, &s->pending_ep2, &s->pending_other}) {
               auto it = std::find_if(pending->begin(), pending->end(), [&](const urb_t &u) {
                 return u.seqnum == target;
               });
@@ -1093,6 +1260,38 @@ namespace platf::virtual_tablet {
       return true;
     }
 
+    /**
+     * The Huion driver: its install folder, or its core program running (it has no service of
+     * its own to look for).
+     */
+    bool huion_driver_installed() {
+      for (const wchar_t *var : {L"ProgramFiles", L"ProgramFiles(x86)"}) {
+        wchar_t dir[MAX_PATH];
+        DWORD n = GetEnvironmentVariableW(var, dir, MAX_PATH);
+        if (n > 0 && n < MAX_PATH) {
+          auto attributes = GetFileAttributesW((std::wstring(dir) + L"\\HuionTablet").c_str());
+          if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            return true;
+          }
+        }
+      }
+      bool found = false;
+      HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+      if (snapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W entry {};
+        entry.dwSize = sizeof(entry);
+        for (BOOL more = Process32FirstW(snapshot, &entry); more && !found; more = Process32NextW(snapshot, &entry)) {
+          found = _wcsicmp(entry.szExeFile, L"HuionTabletCore.exe") == 0 || _wcsicmp(entry.szExeFile, L"TabletDriverCore.exe") == 0;
+        }
+        CloseHandle(snapshot);
+      }
+      return found;
+    }
+
+    const char *model_name(model_e m) {
+      return m == model_e::huion ? "Huion Kamvas 20" : m == model_e::cintiq ? "Wacom Cintiq 22" : "Wacom Intuos Pro M";
+    }
+
     void apply_plugged() {
       std::lock_guard lg(g_plug_mutex);
       bool want = g_want_plugged;
@@ -1100,7 +1299,7 @@ namespace platf::virtual_tablet {
         return;
       }
       if (want && !available()) {
-        return;  // no Wacom driver (or usbip-win2): pen input goes through Windows Ink
+        return;  // no tablet driver (or usbip-win2): pen input goes through Windows Ink
       }
 
       std::string out;
@@ -1115,6 +1314,16 @@ namespace platf::virtual_tablet {
       if (want && port < 0) {
         if (!wait_for_stable_screens()) {
           return;  // the stream ended meanwhile
+        }
+        {
+          // The model for this PC's driver, decided while unplugged
+          std::lock_guard lg_state(g_mutex);
+          model_e m = g_wanted_model;
+          if ((m == model_e::huion) != g_huion || (m == model_e::intuos) != g_intuos) {
+            set_model_locked(m);
+            reset_features();
+            BOOST_LOG(info) << "Virtual tablet: now a "sv << model_name(m);
+          }
         }
         out.clear();
         auto args = L"-t " + std::to_wstring(USBIP_TCP_PORT) + L" attach -r 127.0.0.1 -b " + std::wstring(BUSID, BUSID + std::strlen(BUSID));
@@ -1139,15 +1348,15 @@ namespace platf::virtual_tablet {
   bool available() {
     static std::mutex mutex;
     static std::chrono::steady_clock::time_point checked {};
-    static bool wacom = false, usbip = false, logged = false;
+    static bool wacom = false, huion = false, usbip = false, usable = false, logged = false;
     std::lock_guard lg(mutex);
     auto now = std::chrono::steady_clock::now();
     if (logged && now - checked < 10s) {
-      return wacom && usbip;
+      return usable;
     }
     checked = now;
 
-    bool had_wacom = wacom, had_usbip = usbip;
+    bool had_wacom = wacom, had_huion = huion, had_usbip = usbip;
     wacom = false;
     if (SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)) {
       for (const wchar_t *name : {L"WTabletServicePro", L"WTabletServiceCon"}) {
@@ -1159,15 +1368,28 @@ namespace platf::virtual_tablet {
       }
       CloseServiceHandle(scm);
     }
+    huion = huion_driver_installed();
     usbip = GetFileAttributesW(usbip_exe().c_str()) != INVALID_FILE_ATTRIBUTES;
 
-    if (!logged || wacom != had_wacom || usbip != had_usbip) {
+    // The model: as configured, or ("auto") the one this PC's tablet driver takes; the Wacom
+    // driver wins if both are installed. A Huion without its driver is still a standard pen.
+    const auto &chosen = config::input.pen_virtual_tablet_model;
+    model_e m = chosen == "cintiq" ? model_e::cintiq :
+                chosen == "huion"  ? model_e::huion :
+                chosen == "intuos" ? model_e::intuos :
+                !wacom && huion    ? model_e::huion :
+                                     model_e::intuos;
+    g_wanted_model = m;
+    usable = usbip && (m == model_e::huion ? (huion || chosen == "huion") : wacom);
+
+    if (!logged || wacom != had_wacom || huion != had_huion || usbip != had_usbip) {
       logged = true;
       BOOST_LOG(info) << "Virtual tablet: Wacom driver "sv << (wacom ? "installed"sv : "not installed (free from wacom.com)"sv)
-                      << ", usbip-win2 "sv << (usbip ? "installed"sv : "not installed"sv) << ": pen input via "sv
-                      << (wacom && usbip ? "the virtual Wacom"sv : "Windows Ink"sv);
+                      << ", Huion driver "sv << (huion ? "installed"sv : "not installed"sv) << ", usbip-win2 "sv
+                      << (usbip ? "installed"sv : "not installed"sv) << ": pen input via "sv
+                      << (usable ? "the virtual "s + model_name(m) : "Windows Ink"s);
     }
-    return wacom && usbip;
+    return usable;
   }
 
   void set_plugged(bool plugged) {
@@ -1183,12 +1405,13 @@ namespace platf::virtual_tablet {
       return;
     }
     g_stopping = false;
-    g_intuos = config::input.pen_virtual_tablet_model != "cintiq";
+    available();  // finds the drivers and the model
 
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
     {
       std::lock_guard lg(g_mutex);
+      set_model_locked(g_wanted_model);
       reset_features();
     }
 

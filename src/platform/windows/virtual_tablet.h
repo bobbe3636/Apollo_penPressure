@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/virtual_tablet.h
- * @brief Built-in virtual Wacom tablet (Intuos Pro M or Cintiq 22) presented to Windows over USB/IP.
+ * @brief Built-in virtual tablet (Wacom Intuos Pro M or Cintiq 22, Huion Kamvas 20) presented to Windows over USB/IP.
  */
 #pragma once
 
@@ -18,9 +18,10 @@ namespace platf::virtual_tablet {
   void start();
 
   /**
-   * @brief True when the tablet can be used on this PC: the Wacom driver (free from wacom.com)
-   * and usbip-win2 (installed with Apollo) are there. Otherwise pen input goes through Windows
-   * Ink. Checked again every 10 s, so a driver installed later works from the next stream.
+   * @brief True when the tablet can be used on this PC: a tablet driver (Wacom's, free from
+   * wacom.com, or Huion's) and usbip-win2 (installed with Apollo) are there. Otherwise pen input
+   * goes through Windows Ink. Checked again every 10 s, so a driver installed later works from
+   * the next stream; also picks the model for pen_virtual_tablet_model "auto".
    */
   bool available();
 

@@ -190,8 +190,10 @@ const config = ref(props.config)
     <div class="mb-3" v-if="platform === 'windows' && config.pen_virtual_tablet === 'enabled'">
       <label for="pen_virtual_tablet_model" class="form-label">{{ $t('config.pen_virtual_tablet_model') }}</label>
       <select id="pen_virtual_tablet_model" class="form-select" v-model="config.pen_virtual_tablet_model">
+        <option value="auto">Automatic (the installed driver's)</option>
         <option value="intuos">Wacom Intuos Pro M</option>
         <option value="cintiq">Wacom Cintiq 22</option>
+        <option value="huion">Huion Kamvas 20</option>
       </select>
       <div class="form-text">{{ $t('config.pen_virtual_tablet_model_desc') }}</div>
     </div>

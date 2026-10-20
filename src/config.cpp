@@ -586,7 +586,7 @@ namespace config {
     47000,  // pen_virtual_tablet_port
     true,  // pen_virtual_tablet_desktop
     true,  // pen_virtual_tablet_host
-    "intuos",  // pen_virtual_tablet_model
+    "auto",  // pen_virtual_tablet_model
     0,  // pen_virtual_tablet_screen (0 = all screens)
     false, // enable input only mode
     true, // forward_rumble
@@ -1318,9 +1318,10 @@ namespace config {
     bool_f(vars, "pen_virtual_tablet_desktop", input.pen_virtual_tablet_desktop);
     bool_f(vars, "pen_virtual_tablet_host", input.pen_virtual_tablet_host);
     int_between_f(vars, "pen_virtual_tablet_screen", input.pen_virtual_tablet_screen, {0, 3});
-    string_restricted_f(vars, "pen_virtual_tablet_model", input.pen_virtual_tablet_model, {"intuos"sv, "cintiq"sv});
-    if (input.pen_virtual_tablet_model == "intuos") {
-      // A pen tablet maps to the whole desktop, whatever an older config says
+    string_restricted_f(vars, "pen_virtual_tablet_model", input.pen_virtual_tablet_model, {"auto"sv, "intuos"sv, "cintiq"sv, "huion"sv});
+    if (input.pen_virtual_tablet_model != "cintiq") {
+      // A pen tablet maps to the whole desktop (the Huion: set to all monitors in its driver),
+      // whatever an older config says
       input.pen_virtual_tablet_desktop = true;
     }
     bool_f(vars, "enable_input_only_mode", input.enable_input_only_mode);

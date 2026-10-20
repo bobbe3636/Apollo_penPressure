@@ -564,6 +564,11 @@ namespace platf::virtual_tablet {
       int64_t max_gap_ms = 0;
       uint32_t events = 0, merged = 0, delivered = 0;
       float last_x = 0, last_y = 0;  // the latest position sent to the tablet (0..1)
+      // What the client's pen gave: touching events, their pressure, buttons and tools seen
+      uint32_t contact = 0, contact_no_pressure = 0;
+      float min_pressure = 1.0f, max_pressure = 0.0f;
+      uint8_t buttons = 0;
+      bool eraser = false;
     } g_stats;
 
     void count_event_locked() {
@@ -586,6 +591,17 @@ namespace platf::virtual_tablet {
         BOOST_LOG(info) << "Virtual tablet: pen "sv << g_stats.events * 1000 / elapsed << " events/s, max gap "sv
                         << g_stats.max_gap_ms << " ms, "sv << g_stats.delivered * 1000 / elapsed << " reports/s to the driver, "sv
                         << g_stats.merged << " merged (host behind)"sv;
+        char pen_seen[200];
+        if (g_stats.contact > 0) {
+          snprintf(pen_seen, sizeof(pen_seen), "%u touching (%u without pressure), pressure %.2f..%.2f", g_stats.contact,
+                   g_stats.contact_no_pressure, g_stats.contact > g_stats.contact_no_pressure ? g_stats.min_pressure : 0.0f,
+                   g_stats.max_pressure);
+        } else {
+          snprintf(pen_seen, sizeof(pen_seen), "not touching");
+        }
+        BOOST_LOG(info) << "Virtual tablet: pen "sv << pen_seen << ", buttons "sv << (g_stats.buttons & LI_PEN_BUTTON_PRIMARY ? "1 "sv : ""sv)
+                        << (g_stats.buttons & LI_PEN_BUTTON_SECONDARY ? "2 "sv : ""sv) << (g_stats.buttons & PEN_BUTTON_TERTIARY ? "3 "sv : ""sv)
+                        << (g_stats.buttons ? ""sv : "none "sv) << (g_stats.eraser ? "+ eraser"sv : ""sv);
 
         // Mapping check: where the tablet position ends up on screen, and on which monitor
         POINT cursor {};
@@ -1513,6 +1529,17 @@ namespace platf::virtual_tablet {
     g_pen.apply(pen, x, y);
     g_stats.last_x = x;
     g_stats.last_y = y;
+    if (g_pen.tip && pen.eventType != LI_TOUCH_EVENT_BUTTON_ONLY) {
+      g_stats.contact++;
+      if (pen.pressureOrDistance <= 0.0f) {
+        g_stats.contact_no_pressure++;  // the client didn't know the pressure
+      } else {
+        g_stats.min_pressure = std::min(g_stats.min_pressure, pen.pressureOrDistance);
+        g_stats.max_pressure = std::max(g_stats.max_pressure, pen.pressureOrDistance);
+      }
+    }
+    g_stats.buttons |= g_pen.buttons;
+    g_stats.eraser |= g_pen.tool == LI_TOOL_TYPE_ERASER;
     queue_report_locked();
     count_event_locked();
   }

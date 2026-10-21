@@ -29,6 +29,24 @@ bool activateTarget(const LUID& adapter, UINT32 targetId, const std::wstring& pr
 
 HANDLE SUDOVDA_DRIVER_HANDLE = INVALID_HANDLE_VALUE;
 
+// Display changes are only allowed from the desktop Windows is showing. Before anyone signs in
+// (and on the lock and UAC screens) that's Winlogon's secure desktop, not the Default one our
+// threads start on: SetDisplayConfig failed there, so the virtual display never became the main
+// one and the sign-in screen stayed on a monitor nobody streams. Attach to it first (as the
+// capture does); after sign-in that's the Default desktop and nothing changes.
+static LONG setDisplayConfig(UINT32 numPaths, DISPLAYCONFIG_PATH_INFO* paths, UINT32 numModes,
+                             DISPLAYCONFIG_MODE_INFO* modes, UINT32 flags) {
+	if (HDESK desk = OpenInputDesktop(0, FALSE, GENERIC_ALL)) {
+		SetThreadDesktop(desk);
+		CloseDesktop(desk);
+	}
+	LONG result = SetDisplayConfig(numPaths, paths, numModes, modes, flags);
+	if (result != ERROR_SUCCESS) {
+		printf("[SUDOVDA] SetDisplayConfig failed: %ld\n", result);
+	}
+	return result;
+}
+
 // ---- Display broker ----
 // SudoVDA accepts one open handle at a time, so only one Apollo process can talk to it. With
 // extra screens, the main instance keeps the driver and serves add/remove requests over a local
@@ -650,7 +668,7 @@ bool waitForDisplayActive(const wchar_t* deviceName, int timeoutMs) {
 
 bool extendAllDisplays() {
 	std::lock_guard lock(g_configMutex);
-	LONG result = SetDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
+	LONG result = setDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
 	printf("[SUDOVDA] Extend all displays: %ld\n", result);
 	return result == ERROR_SUCCESS;
 }
@@ -725,7 +743,7 @@ bool activateTarget(const LUID& adapter, UINT32 targetId, const std::wstring& pr
 			}
 		}
 		config.push_back(path);
-		LONG result = SetDisplayConfig((UINT32) config.size(), config.data(), (UINT32) modes.size(), modes.data(),
+		LONG result = setDisplayConfig((UINT32) config.size(), config.data(), (UINT32) modes.size(), modes.data(),
 			SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE);
 		printf("[SUDOVDA] Switched on display target %u: %ld\n", targetId, result);
 		return result == ERROR_SUCCESS;
@@ -803,7 +821,7 @@ bool arrangeInRow(const wchar_t* deviceName, int slot) {
 
 	ours->position.x = right + slot * (LONG) ours->width;
 	ours->position.y = 0;
-	LONG result = SetDisplayConfig((UINT32) paths.size(), paths.data(), (UINT32) modes.size(), modes.data(),
+	LONG result = setDisplayConfig((UINT32) paths.size(), paths.data(), (UINT32) modes.size(), modes.data(),
 		SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
 	wprintf(L"[SUDOVDA] Placed %ls at x=%ld (slot %d): %ld\n", deviceName, ours->position.x, slot, result);
 	return result == ERROR_SUCCESS;
@@ -912,7 +930,7 @@ bool keepOnlyVirtualDisplays() {
 		}
 	}
 
-	LONG result = SetDisplayConfig((UINT32) keep.size(), keep.data(), (UINT32) keepModes.size(), keepModes.data(),
+	LONG result = setDisplayConfig((UINT32) keep.size(), keep.data(), (UINT32) keepModes.size(), keepModes.data(),
 		SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
 	printf("[SUDOVDA] Physical displays off (%zu virtual kept): %ld\n", keep.size(), result);
 	if (result == ERROR_SUCCESS) {
@@ -975,7 +993,7 @@ bool makeMainDisplay(const wchar_t* deviceName) {
 			mode.sourceMode.position.y -= origin.y;
 		}
 	}
-	LONG result = SetDisplayConfig((UINT32) paths.size(), paths.data(), (UINT32) modes.size(), modes.data(),
+	LONG result = setDisplayConfig((UINT32) paths.size(), paths.data(), (UINT32) modes.size(), modes.data(),
 		SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
 	wprintf(L"[SUDOVDA] %ls is the main display: %ld\n", deviceName, result);
 	if (result == ERROR_SUCCESS) {
@@ -1094,7 +1112,7 @@ bool layoutRow() {
 				modes[idx].sourceMode.position.y -= minTop;
 			}
 		}
-		return SetDisplayConfig((UINT32) paths.size(), paths.data(), (UINT32) modes.size(), modes.data(),
+		return setDisplayConfig((UINT32) paths.size(), paths.data(), (UINT32) modes.size(), modes.data(),
 			SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
 	};
 	bool remembered = !g_arrangement.empty();
@@ -1219,11 +1237,11 @@ void restorePhysicalDisplays() {
 
 	LONG result = ERROR_INVALID_PARAMETER;
 	if (restored > 0) {
-		result = SetDisplayConfig((UINT32) config.size(), config.data(), (UINT32) configModes.size(), configModes.data(),
+		result = setDisplayConfig((UINT32) config.size(), config.data(), (UINT32) configModes.size(), configModes.data(),
 			SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES);
 	}
 	if (result != ERROR_SUCCESS) {
-		result = SetDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
+		result = setDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
 	}
 	printf("[SUDOVDA] Physical displays back on (%zu of %zu from before, %zu others kept): %ld\n", restored, g_savedPaths.size(),
 		config.size() - restored, result);
@@ -1242,7 +1260,7 @@ void ensurePhysicalDisplaysOn() {
 			return;  // a physical display is on
 		}
 	}
-	LONG result = SetDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
+	LONG result = setDisplayConfig(0, nullptr, 0, nullptr, SDC_APPLY | SDC_TOPOLOGY_EXTEND);
 	printf("[SUDOVDA] No physical display was on, switched them on: %ld\n", result);
 }
 
@@ -1479,7 +1497,7 @@ LONG changeDisplaySettings2(const wchar_t* deviceName, int width, int height, in
 
 		// Apply the changes only if the virtual display was found
 		if( bVirtualDisplayAlreadyAdded == true ) {
-			LONG status = SetDisplayConfig(
+			LONG status = setDisplayConfig(
 				pathCount,
 				pathArray.data(),
 				modeCount,
@@ -1538,7 +1556,7 @@ LONG changeDisplaySettings2(const wchar_t* deviceName, int width, int height, in
 					targetInfo->refreshRate = {(UINT32)refresh_rate, 1000};
 
 					// Apply the changes
-					LONG status = SetDisplayConfig(
+					LONG status = setDisplayConfig(
 						pathCount,
 						pathArray.data(),
 						modeCount,

@@ -1408,6 +1408,11 @@ namespace platf::virtual_tablet {
     return usable;
   }
 
+  bool maps_one_screen() {
+    available();  // finds the model
+    return g_wanted_model == model_e::huion;
+  }
+
   void set_plugged(bool plugged) {
     if (!g_running) {
       return;  // the tablet lives in the main instance

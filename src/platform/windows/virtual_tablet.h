@@ -26,6 +26,13 @@ namespace platf::virtual_tablet {
   bool available();
 
   /**
+   * @brief The model is a pen display its driver maps to one monitor only (the Huion Kamvas: the
+   * Huion app has no "all monitors" for it). The pen then goes to it from screen 1 only, placed
+   * on that screen; the other screens get a Windows Ink pen.
+   */
+  bool maps_one_screen();
+
+  /**
    * @brief Stop serving the tablet (the Wacom driver sees it unplugged).
    */
   void stop();

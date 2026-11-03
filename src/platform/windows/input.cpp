@@ -1100,7 +1100,7 @@ namespace platf {
   static void forward_pen_to_virtual_tablet(const touch_port_t &touch_port, const pen_input_t &pen) {
     float x = pen.x;
     float y = pen.y;
-    if (config::input.pen_virtual_tablet_desktop && touch_port.width > 0 && touch_port.height > 0) {
+    if (config::input.pen_virtual_tablet_desktop && !virtual_tablet::maps_one_screen() && touch_port.width > 0 && touch_port.height > 0) {
       // The display's offset is already relative to the desktop's top-left corner
       // (display_base: offset -= SM_X/YVIRTUALSCREEN)
       int desktop_w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -1163,7 +1163,8 @@ namespace platf {
     int screen = config::nvhttp.extra_screen_index > 0 ? config::nvhttp.extra_screen_index : 1;
     int chosen = config::input.pen_virtual_tablet_screen;
     if (chosen == 0) {
-      return true;  // all screens
+      // All screens; a pen display mapped to one monitor (screen 1, the main one) only from there
+      return !virtual_tablet::maps_one_screen() || screen == 1;
     }
     if (config::nvhttp.extra_screen_index == 0 && chosen > config::nvhttp.extra_screens + 1) {
       chosen = 1;  // no such screen right now

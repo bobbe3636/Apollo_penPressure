@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/virtual_tablet.cpp
- * @brief Built-in virtual tablet (Wacom Intuos Pro M, Huion Kamvas 20) presented to Windows over USB/IP.
+ * @brief Built-in virtual tablet (Wacom Intuos Pro M, Huion Inspiroy H640P) presented to Windows over USB/IP.
  *
  * The tablet is a USB/IP server on 127.0.0.1 that answers like a real Wacom: its descriptors,
  * the Wacom driver's feature-report handshake, and pen state encoded as the device's native
@@ -11,10 +11,10 @@
  * - Intuos Pro M (3rd gen, PTK-670; the default): a pen tablet, so the Wacom driver maps it to
  *   the whole desktop (every screen) with no setup, and it never pairs with, or shares settings
  *   with, a real Cintiq on the same PC. Descriptors from the public linuxwacom recording.
- * - Huion Kamvas 20: for a PC with the Huion driver instead of Wacom's (chosen automatically),
- *   captured from a real one. The Huion driver reads its hidden strings (201 firmware, 200
- *   parameters), which switches it to Huion's own reports; without that driver it is a standard
- *   HID pen (Windows Ink, 8192 levels).
+ * - Huion Inspiroy H640P: for a PC with the Huion driver instead of Wacom's (chosen
+ *   automatically). A pen tablet too, so the Huion driver can map it to all monitors; from public
+ *   data. The Huion driver reads its hidden strings (201 firmware, 200 parameters), which switches
+ *   it to Huion's own reports; without that driver it is a standard HID pen (Windows Ink, 8192 levels).
  */
 // platform includes
 #include <winsock2.h>  // must precede Windows.h
@@ -72,9 +72,10 @@ namespace platf::virtual_tablet {
     constexpr int IPM_X_MAX = 52600, IPM_Y_MAX = 29600, IPM_P_MAX = 8191, IPM_DIST_MAX = 255, IPM_MARGIN = 397;
     constexpr int IPM_X_MAX_GENERIC = 26300, IPM_Y_MAX_GENERIC = 14800, IPM_P_MAX_GENERIC = 4095;
     constexpr const char *IPM_SERIAL = "4HHS1K1000713";
-    // Huion Kamvas 20: Huion's report 0x08 (the ranges its string 200 gives the driver), and the
-    // standard HID pen report 0x0A it sends until the Huion driver reads that string
-    constexpr int HUION_X_MAX = 86970, HUION_Y_MAX = 47752, HUION_P_MAX = 8191, HUION_TILT_MAX = 60;
+    // Huion Inspiroy H640P: Huion's report 0x08 (the ranges its string 200 gives the driver), and
+    // the standard HID pen report 0x0A it sends until the Huion driver reads that string. Its pen
+    // has no tilt (the report's tilt bytes stay 0, as the real one's)
+    constexpr int HUION_X_MAX = 32000, HUION_Y_MAX = 20000, HUION_P_MAX = 8191;
     constexpr int HUION_X_MAX_GENERIC = 32767, HUION_Y_MAX_GENERIC = 32767;
     constexpr uint8_t PEN_BUTTON_TERTIARY = 0x04;  // LI_PEN_BUTTON_TERTIARY
     constexpr size_t MAX_QUEUED_REPORTS = 16;  // motion is merged, so this only holds state changes
@@ -278,7 +279,7 @@ namespace platf::virtual_tablet {
         return r;
       }
 
-      // ---------------------------------------------------------- Huion Kamvas 20
+      // ---------------------------------------------------------- Huion Inspiroy H640P
       /**
        * Huion's report 0x08, 12 bytes: 0x80 | tip, barrel 1 (0x02), barrel 2 (0x04); X and Y in
        * 24 bits, their high bytes after the pressure; tilt, Y flipped. It has no in-range bit:
@@ -307,8 +308,8 @@ namespace platf::virtual_tablet {
         put16le(r, tip ? (uint16_t) (pressure * HUION_P_MAX) : 0);
         put8(r, (uint8_t) (hx >> 16));
         put8(r, (uint8_t) (hy >> 16));
-        put8(r, (uint8_t) (int8_t) std::clamp(tilt_x, -HUION_TILT_MAX, HUION_TILT_MAX));
-        put8(r, (uint8_t) (int8_t) std::clamp(-tilt_y, -HUION_TILT_MAX, HUION_TILT_MAX));
+        put8(r, 0);  // tilt X, Y: none
+        put8(r, 0);
         return r;
       }
 
@@ -338,8 +339,6 @@ namespace platf::virtual_tablet {
         put16le(r, (uint16_t) (x * HUION_X_MAX_GENERIC));
         put16le(r, (uint16_t) (y * HUION_Y_MAX_GENERIC));
         put16le(r, tip ? (uint16_t) (pressure * HUION_P_MAX) : 0);
-        put8(r, (uint8_t) (int8_t) std::clamp(tilt_x, -HUION_TILT_MAX, HUION_TILT_MAX));
-        put8(r, (uint8_t) (int8_t) std::clamp(tilt_y, -HUION_TILT_MAX, HUION_TILT_MAX));
         return r;
       }
     };
@@ -368,13 +367,13 @@ namespace platf::virtual_tablet {
     uint8_t g_data_mode = 1;
     std::map<uint8_t, std::vector<uint8_t>> g_features;
     // The model plugged in: chosen from pen_virtual_tablet_model ("auto": the Wacom driver's
-    // Intuos Pro M, or a Huion Kamvas 20 on a PC with the Huion driver) each time it is plugged in
+    // Intuos Pro M, or a Huion Inspiroy H640P on a PC with the Huion driver) each time it is plugged in
     enum class model_e {
       intuos,
       huion
     };
     bool g_intuos = true;  ///< Intuos Pro M
-    bool g_huion = false;  ///< Huion Kamvas 20
+    bool g_huion = false;  ///< Huion Inspiroy H640P
     bool g_huion_mode = false;  ///< The Huion driver read string 200: Huion's reports on endpoint 1
     std::atomic<model_e> g_wanted_model {model_e::intuos};  ///< What available() last found
     uint16_t g_report_seq = 0;
@@ -403,7 +402,7 @@ namespace platf::virtual_tablet {
       if (g_huion) {
         namespace d = descriptors_huion;
         return {d::device, sizeof(d::device), d::config, sizeof(d::config), nullptr, 0, d::string_product,
-                sizeof(d::string_product), "", "Huion Kamvas 20"};
+                sizeof(d::string_product), "", "Huion Inspiroy H640P"};
       }
       namespace d = descriptors_intuos;
       return {d::device, sizeof(d::device), d::config, sizeof(d::config), d::string_manufacturer, sizeof(d::string_manufacturer),
@@ -1211,7 +1210,7 @@ namespace platf::virtual_tablet {
     }
 
     const char *model_name(model_e m) {
-      return m == model_e::huion ? "Huion Kamvas 20" : "Wacom Intuos Pro M";
+      return m == model_e::huion ? "Huion Inspiroy H640P" : "Wacom Intuos Pro M";
     }
 
     void apply_plugged() {

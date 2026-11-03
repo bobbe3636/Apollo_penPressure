@@ -1,6 +1,6 @@
 /**
  * @file src/platform/windows/virtual_tablet.cpp
- * @brief Built-in virtual Wacom tablet (Intuos Pro M or Cintiq 22) presented to Windows over USB/IP.
+ * @brief Built-in virtual tablet (Wacom Intuos Pro M, Huion Kamvas 20) presented to Windows over USB/IP.
  *
  * The tablet is a USB/IP server on 127.0.0.1 that answers like a real Wacom: its descriptors,
  * the Wacom driver's feature-report handshake, and pen state encoded as the device's native
@@ -11,8 +11,6 @@
  * - Intuos Pro M (3rd gen, PTK-670; the default): a pen tablet, so the Wacom driver maps it to
  *   the whole desktop (every screen) with no setup, and it never pairs with, or shares settings
  *   with, a real Cintiq on the same PC. Descriptors from the public linuxwacom recording.
- * - Cintiq 22: a pen display, captured from the real device. Wacom ties it to one monitor
- *   (or All displays) and pairs it with a real Cintiq 22's screen if there is one.
  * - Huion Kamvas 20: for a PC with the Huion driver instead of Wacom's (chosen automatically),
  *   captured from a real one. The Huion driver reads its hidden strings (201 firmware, 200
  *   parameters), which switches it to Huion's own reports; without that driver it is a standard
@@ -45,7 +43,6 @@
 #include "src/config.h"
 #include "src/logging.h"
 #include "virtual_tablet.h"
-#include "virtual_tablet_descriptors.h"
 #include "virtual_tablet_descriptors_huion.h"
 #include "virtual_tablet_descriptors_intuos.h"
 
@@ -65,13 +62,10 @@ namespace platf::virtual_tablet {
     constexpr const char *BUSID = "1-1";
 
     // ---------------------------------------------------------------- the tablet
-    constexpr int X_MAX = 96012, Y_MAX = 54358, P_MAX = 8191, DIST_MAX = 63;  // report 0x10
-    constexpr int X_MAX_GENERIC = 32767, Y_MAX_GENERIC = 32767, P_MAX_GENERIC = 2047;  // report 0x06
     // A Pro Pen 2 of its own: the captured pen's serial (0x97800A01) made the Wacom driver ignore
     // the virtual pen once the real pen had been on a real tablet
     constexpr uint32_t PEN_SERIAL_LO = 0x5157A0D1, PEN_SERIAL_HI = 0x00100842;
     constexpr uint16_t TOOL_PRO_PEN2 = 0x0842, TOOL_PRO_PEN2_ERASER = 0x084A;
-    constexpr const char *SERIAL = "VW00000000001";
 
     // Intuos Pro M (3rd gen): report 30 (native) and report 6 (generic) ranges. The Wacom driver
     // maps the active area 397 counts inside each edge to the whole desktop (measured).
@@ -216,51 +210,6 @@ namespace platf::virtual_tablet {
         }
       }
 
-      uint8_t flags(bool sense) const {
-        uint8_t f = sense ? 0x40 : 0x00;
-        if (in_range) {
-          f |= 0x20;  // in range
-          if (tool == LI_TOOL_TYPE_ERASER) {
-            f |= 0x10;  // invert
-            if (tip) {
-              f |= 0x08;  // eraser contact
-            }
-          } else if (tip) {
-            f |= 0x01;  // tip
-          }
-          if (buttons & LI_PEN_BUTTON_PRIMARY) {
-            f |= 0x02;  // barrel switch 1
-          }
-          if (buttons & LI_PEN_BUTTON_SECONDARY) {
-            f |= 0x04;  // barrel switch 2
-          }
-        }
-        return f;
-      }
-
-      uint8_t dist() const {
-        return tip ? 0 : in_range ? (uint8_t) (distance * DIST_MAX) : DIST_MAX;
-      }
-
-      /// The tablet's native report (after the driver sets DataMode 2)
-      std::vector<uint8_t> report10() const {
-        std::vector<uint8_t> r;
-        put8(r, 0x10);
-        put8(r, flags(true));
-        put24le(r, (uint32_t) (x * X_MAX));
-        put24le(r, (uint32_t) (y * Y_MAX));
-        put16le(r, tip ? (uint16_t) (pressure * P_MAX) : 0);
-        put8(r, (uint8_t) (int8_t) std::clamp(tilt_x, -64, 63));
-        put8(r, (uint8_t) (int8_t) std::clamp(tilt_y, -64, 63));
-        put16le(r, 0);  // twist
-        put16le(r, 0);
-        put8(r, dist());
-        put32le(r, in_range ? PEN_SERIAL_LO : 0);
-        put32le(r, in_range ? PEN_SERIAL_HI : 0);
-        put16le(r, in_range ? (tool == LI_TOOL_TYPE_ERASER ? TOOL_PRO_PEN2_ERASER : TOOL_PRO_PEN2) : 0);
-        return r;
-      }
-
       // ---------------------------------------------------------- Intuos Pro M
       /// Tip, 3 side switches, eraser, invert, in range (+ sense, report 30 only)
       uint8_t ipm_flags() const {
@@ -326,27 +275,6 @@ namespace platf::virtual_tablet {
         put8(r, tip ? 0 : in_range ? (uint8_t) (distance * IPM_DIST_MAX) : IPM_DIST_MAX);
         put16le(r, scan_time);
         put16le(r, seq);
-        return r;
-      }
-
-      /// Generic HID pen report the tablet sends before the Wacom driver switches modes
-      std::vector<uint8_t> report06() const {
-        std::vector<uint8_t> r;
-        put8(r, 0x06);
-        put8(r, flags(false));
-        put16le(r, (uint16_t) (x * X_MAX_GENERIC));
-        put8(r, 0);
-        put16le(r, (uint16_t) (y * Y_MAX_GENERIC));
-        put8(r, 0);
-        put16le(r, tip ? (uint16_t) (pressure * P_MAX_GENERIC) : 0);
-        put8(r, (uint8_t) (int8_t) std::clamp(tilt_x, -90, 90));
-        put8(r, (uint8_t) (int8_t) std::clamp(tilt_y, -90, 90));
-        put16le(r, 0);
-        put16le(r, 0);
-        put8(r, dist());
-        put32le(r, in_range ? PEN_SERIAL_LO : 0);
-        put32le(r, in_range ? PEN_SERIAL_HI : 0);
-        put16le(r, in_range ? (tool == LI_TOOL_TYPE_ERASER ? TOOL_PRO_PEN2_ERASER : TOOL_PRO_PEN2) : 0);
         return r;
       }
 
@@ -443,11 +371,10 @@ namespace platf::virtual_tablet {
     // Intuos Pro M, or a Huion Kamvas 20 on a PC with the Huion driver) each time it is plugged in
     enum class model_e {
       intuos,
-      cintiq,
       huion
     };
     bool g_intuos = true;  ///< Intuos Pro M
-    bool g_huion = false;  ///< Huion Kamvas 20 (neither: Cintiq 22)
+    bool g_huion = false;  ///< Huion Kamvas 20
     bool g_huion_mode = false;  ///< The Huion driver read string 200: Huion's reports on endpoint 1
     std::atomic<model_e> g_wanted_model {model_e::intuos};  ///< What available() last found
     uint16_t g_report_seq = 0;
@@ -478,14 +405,9 @@ namespace platf::virtual_tablet {
         return {d::device, sizeof(d::device), d::config, sizeof(d::config), nullptr, 0, d::string_product,
                 sizeof(d::string_product), "", "Huion Kamvas 20"};
       }
-      if (g_intuos) {
-        namespace d = descriptors_intuos;
-        return {d::device, sizeof(d::device), d::config, sizeof(d::config), d::string_manufacturer, sizeof(d::string_manufacturer),
-                d::string_product, sizeof(d::string_product), IPM_SERIAL, "Wacom Intuos Pro M"};
-      }
-      namespace d = descriptors;
+      namespace d = descriptors_intuos;
       return {d::device, sizeof(d::device), d::config, sizeof(d::config), d::string_manufacturer, sizeof(d::string_manufacturer),
-              d::string_product, sizeof(d::string_product), SERIAL, "Wacom Cintiq 22"};
+              d::string_product, sizeof(d::string_product), IPM_SERIAL, "Wacom Intuos Pro M"};
     }
 
     /// The HID report descriptor of an interface (nullptr: none)
@@ -497,20 +419,13 @@ namespace platf::virtual_tablet {
         size = iface == 0 ? sizeof(descriptors_huion::hid_report_if0) : sizeof(descriptors_huion::hid_report_if1);
         return iface == 0 ? descriptors_huion::hid_report_if0 : descriptors_huion::hid_report_if1;
       }
-      if (g_intuos) {
-        if (iface == 0) {
-          size = sizeof(descriptors_intuos::hid_report_if0);
-          return descriptors_intuos::hid_report_if0;
-        }
-        if (iface == 2) {
-          size = sizeof(descriptors_intuos::hid_report_if2);
-          return descriptors_intuos::hid_report_if2;
-        }
-        return nullptr;
-      }
       if (iface == 0) {
-        size = sizeof(descriptors::hid_report);
-        return descriptors::hid_report;
+        size = sizeof(descriptors_intuos::hid_report_if0);
+        return descriptors_intuos::hid_report_if0;
+      }
+      if (iface == 2) {
+        size = sizeof(descriptors_intuos::hid_report_if2);
+        return descriptors_intuos::hid_report_if2;
       }
       return nullptr;
     }
@@ -542,7 +457,7 @@ namespace platf::virtual_tablet {
       for (size_t i = 0; i < 13; i++) {
         serial_report.push_back(i < std::strlen(serial) ? serial[i] : 0);
       }
-      // The Wacom driver's reads, answered as the real Cintiq 22 did
+      // The Wacom driver's reads, answered as a real Wacom does (captured from a Cintiq 22)
       g_features = {
         {0x02, {0x02, 0x01}},
         {0x03, {0x03, 0x00}},
@@ -629,11 +544,8 @@ namespace platf::virtual_tablet {
       if (g_huion) {
         return g_huion_mode ? g_pen.huion_report08() : g_pen.huion_report0a();
       }
-      if (g_intuos) {
-        g_report_seq++;
-        return g_data_mode == 2 ? g_pen.report30(scan_time_now(), g_report_seq) : g_pen.report06_ipm(scan_time_now(), g_report_seq);
-      }
-      return g_data_mode == 2 ? g_pen.report10() : g_pen.report06();
+      g_report_seq++;
+      return g_data_mode == 2 ? g_pen.report30(scan_time_now(), g_report_seq) : g_pen.report06_ipm(scan_time_now(), g_report_seq);
     }
 
     /**
@@ -854,16 +766,10 @@ namespace platf::virtual_tablet {
                 std::vector<uint8_t> r;
                 if (g_huion) {
                   r = report_id == 0x08 ? g_pen.huion_report08() : std::vector<uint8_t> {};
-                } else if (g_intuos) {
-                  if (report_id == 0x1E) {
-                    r = g_pen.report30(scan_time_now(), g_report_seq);
-                  } else if (report_id == 0x06) {
-                    r = g_pen.report06_ipm(scan_time_now(), g_report_seq);
-                  }
-                } else if (report_id == 0x10) {
-                  r = g_pen.report10();
+                } else if (report_id == 0x1E) {
+                  r = g_pen.report30(scan_time_now(), g_report_seq);
                 } else if (report_id == 0x06) {
-                  r = g_pen.report06();
+                  r = g_pen.report06_ipm(scan_time_now(), g_report_seq);
                 }
                 if (r.empty()) {
                   return EPIPE_STATUS;
@@ -1305,7 +1211,7 @@ namespace platf::virtual_tablet {
     }
 
     const char *model_name(model_e m) {
-      return m == model_e::huion ? "Huion Kamvas 20" : m == model_e::cintiq ? "Wacom Cintiq 22" : "Wacom Intuos Pro M";
+      return m == model_e::huion ? "Huion Kamvas 20" : "Wacom Intuos Pro M";
     }
 
     void apply_plugged() {
@@ -1390,8 +1296,7 @@ namespace platf::virtual_tablet {
     // The model: as configured, or ("auto") the one this PC's tablet driver takes; the Wacom
     // driver wins if both are installed. A Huion without its driver is still a standard pen.
     const auto &chosen = config::input.pen_virtual_tablet_model;
-    model_e m = chosen == "cintiq" ? model_e::cintiq :
-                chosen == "huion"  ? model_e::huion :
+    model_e m = chosen == "huion"  ? model_e::huion :
                 chosen == "intuos" ? model_e::intuos :
                 !wacom && huion    ? model_e::huion :
                                      model_e::intuos;

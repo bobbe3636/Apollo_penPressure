@@ -1320,12 +1320,10 @@ namespace config {
     bool_f(vars, "pen_virtual_tablet_desktop", input.pen_virtual_tablet_desktop);
     bool_f(vars, "pen_virtual_tablet_host", input.pen_virtual_tablet_host);
     int_between_f(vars, "pen_virtual_tablet_screen", input.pen_virtual_tablet_screen, {0, 3});
-    string_restricted_f(vars, "pen_virtual_tablet_model", input.pen_virtual_tablet_model, {"auto"sv, "intuos"sv, "cintiq"sv, "huion"sv});
-    if (input.pen_virtual_tablet_model != "cintiq") {
-      // A pen tablet maps to the whole desktop (the Huion: set to all monitors in its driver),
-      // whatever an older config says
-      input.pen_virtual_tablet_desktop = true;
-    }
+    // (an older config's "cintiq", a model no longer offered, falls back to the default)
+    string_restricted_f(vars, "pen_virtual_tablet_model", input.pen_virtual_tablet_model, {"auto"sv, "intuos"sv, "huion"sv});
+    // The virtual tablets map to the whole desktop, whatever an older config says
+    input.pen_virtual_tablet_desktop = true;
     bool_f(vars, "enable_input_only_mode", input.enable_input_only_mode);
 
     bool_f(vars, "system_tray", sunshine.system_tray);

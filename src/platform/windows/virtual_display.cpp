@@ -756,6 +756,11 @@ void setKeepPhysicalOff(bool on) {
 	g_keepPhysicalOff = on;
 }
 
+bool hasPhysicalDisplays() {
+	std::lock_guard lock(g_configMutex);
+	return physicalDisplayOn();
+}
+
 std::wstring describeDisplays() {
 	std::wstring out;
 	DISPLAY_DEVICEW adapter {};

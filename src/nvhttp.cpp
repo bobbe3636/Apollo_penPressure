@@ -1213,6 +1213,17 @@ namespace nvhttp {
    * caller starts it afresh, on a display of the new size. Only while nobody is streaming it.
    * `for_app`: a launch, which must name the running app (a resume always means it).
    */
+  /// The display size a client asks for (as make_launch_session() reads it: its mode, or the one set for it)
+  static bool requested_size(req_https_t request, int &width, int &height) {
+    auto named_cert_p = get_verified_cert(request);
+    if (named_cert_p == nullptr) {
+      return false;
+    }
+    auto args = request->parse_query_string();
+    std::string mode {named_cert_p->display_mode.empty() ? std::string {get_arg(args, "mode", config::video.fallback_mode.c_str())} : named_cert_p->display_mode};
+    return std::sscanf(mode.c_str(), "%dx%d", &width, &height) == 2 && width > 0 && height > 0;
+  }
+
   static void end_app_for_new_resolution(req_https_t request, bool for_app) {
     if (config::nvhttp.extra_screen_index > 0 || !proc::proc.virtual_display || proc::proc.running() == 0 ||
         rtsp_stream::session_count() > 0 || proc::proc.client_width <= 0 || proc::proc.client_height <= 0) {
@@ -1273,14 +1284,23 @@ namespace nvhttp {
     // connection is over, even if it still looks alive (a window closed abruptly only times out
     // later). End it, as "quit app" does, so this screen starts fresh and gets its display
     // again instead of resuming without one (and streaming another screen's picture).
+    // With the screens kept (keep_screens) and the same size asked for, it resumes on the display
+    // it has: no display change on the PC.
     if (config::nvhttp.extra_screen_index > 0 && current_appid > 0) {
-      BOOST_LOG(info) << "Extra screen: new connection, ending the previous one"sv;
-      rtsp_stream::terminate_sessions();
-      if (proc::proc.running() > 0) {
-        proc::proc.terminate();
+      int width = 0, height = 0;
+      if (proc::keep_screens_on_disconnect() && proc::proc.virtual_display && requested_size(request, width, height) &&
+          width == proc::proc.client_width && height == proc::proc.client_height) {
+        BOOST_LOG(info) << "Extra screen: new connection, resuming on its display ("sv << width << 'x' << height << ')';
+        rtsp_stream::terminate_sessions();
+      } else {
+        BOOST_LOG(info) << "Extra screen: new connection, ending the previous one"sv;
+        rtsp_stream::terminate_sessions();
+        if (proc::proc.running() > 0) {
+          proc::proc.terminate();
+        }
+        current_appid = proc::proc.running();
+        current_app_uuid = proc::proc.get_running_app_uuid();
       }
-      current_appid = proc::proc.running();
-      current_app_uuid = proc::proc.get_running_app_uuid();
     }
 
     bool is_input_only = config::input.enable_input_only_mode && (appid == proc::input_only_app_id || (appuuid_str == REMOTE_INPUT_UUID));

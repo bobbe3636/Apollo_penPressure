@@ -199,6 +199,12 @@ namespace proc {
 
   extern proc_t proc;
 
+  /**
+   * @brief Keep the virtual screens when the last client disconnects (keep_screens): the
+   * session only pauses, and reconnecting at the same size resumes it with no display change.
+   */
+  bool keep_screens_on_disconnect();
+
   extern int input_only_app_id;
   extern std::string input_only_app_id_str;
   extern int terminate_app_id;

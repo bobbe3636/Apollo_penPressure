@@ -181,6 +181,17 @@ const validateFallbackMode = (event) => {
               v-if="platform === 'windows'"
     ></Checkbox>
 
+    <!-- On disconnect: keep the virtual screens -->
+    <div class="mb-3" v-if="platform === 'windows'">
+      <label for="keep_screens" class="form-label">{{ $t('config.keep_screens') }}</label>
+      <select id="keep_screens" class="form-select" v-model="config.keep_screens">
+        <option value="auto">{{ $t('config.keep_screens_auto') }}</option>
+        <option value="always">{{ $t('config.keep_screens_always') }}</option>
+        <option value="never">{{ $t('config.keep_screens_never') }}</option>
+      </select>
+      <div class="form-text">{{ $t('config.keep_screens_desc') }}</div>
+    </div>
+
     <!-- Double Refreshrate -->
     <Checkbox class="mb-3"
               id="double_refreshrate"

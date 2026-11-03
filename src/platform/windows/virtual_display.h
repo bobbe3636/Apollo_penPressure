@@ -63,6 +63,9 @@ namespace VDISPLAY {
 
 	// "\\.\DISPLAY5 virtual 2560x1440 at 0,0; ..." for the log
 	std::wstring describeDisplays();
+
+	// A monitor of the PC's own is on (not a virtual display: ours or another tool's)
+	bool hasPhysicalDisplays();
 	bool isDisplayBrokerClient();
 
 	// Place a virtual display in slot `slot` (0, 1, 2) of a row to the right of the other

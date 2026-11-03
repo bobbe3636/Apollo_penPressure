@@ -55,6 +55,50 @@ namespace proc {
 
   proc_t proc;
 
+#ifdef _WIN32
+  /**
+   * keep_screens "auto": keep them on a PC without monitors of its own, where the virtual screens
+   * are its only displays (removing them left apps with no display at all: some crashed). The
+   * main instance finds out when it switches the monitors off, and tells its extra screens
+   * (other processes) through a named event.
+   */
+  static HANDLE has_monitors_event() {
+    static HANDLE event = [] {
+      int index = config::nvhttp.extra_screen_index;
+      int main_port = config::sunshine.port - (index > 0 ? 1000 * (index - 1) : 0);
+      std::wstring name = L"Local\\ApolloHasMonitors-" + std::to_wstring(main_port);
+      return CreateEventW(nullptr, TRUE, TRUE, name.c_str());  // until known: monitors
+    }();
+    return event;
+  }
+
+  static void remember_monitors(bool present) {
+    if (HANDLE event = has_monitors_event()) {
+      present ? SetEvent(event) : ResetEvent(event);
+    }
+  }
+
+  static bool pc_has_monitors() {
+    HANDLE event = has_monitors_event();
+    return event == nullptr || WaitForSingleObject(event, 0) == WAIT_OBJECT_0;
+  }
+#endif
+
+  bool keep_screens_on_disconnect() {
+#ifdef _WIN32
+    const auto &mode = config::nvhttp.keep_screens;
+    if (mode == "always") {
+      return true;
+    }
+    if (mode == "never") {
+      return false;
+    }
+    return !pc_has_monitors();
+#else
+    return false;
+#endif
+  }
+
   int input_only_app_id = -1;
   std::string input_only_app_id_str;
   int terminate_app_id = -1;
@@ -364,6 +408,7 @@ namespace proc {
             // are created through our broker when they connect, one at a time, and it switches
             // the monitors off again after each (Windows may switch them on for a new display).
             bool physical_off = false;
+            remember_monitors(VDISPLAY::hasPhysicalDisplays());
             if (config::nvhttp.disable_physical_displays) {
               VDISPLAY::setKeepPhysicalOff(true);
               physical_off = VDISPLAY::keepOnlyVirtualDisplays();
@@ -749,7 +794,13 @@ namespace proc {
     // monitors back exactly as they were. With extra screens every screen's app ends, even one
     // that didn't get its display: resuming it would skip creating the display again, and that
     // screen would keep streaming another screen's picture.
-    if (config::nvhttp.extra_screen_index > 0 || config::nvhttp.extra_screens > 0 ||
+    // Unless the screens are kept (keep_screens): then nothing changes on the PC, which apps whose
+    // window is on a virtual screen need (some crashed when their display went away), and the
+    // same screens resume. Quit ends them. A screen that didn't get its display ends anyway.
+    if (keep_screens_on_disconnect() && this->virtual_display) {
+      BOOST_LOG(info) << "All clients disconnected: keeping the virtual screens (keep_screens = "sv << config::nvhttp.keep_screens
+                      << "); quit to remove them"sv;
+    } else if (config::nvhttp.extra_screen_index > 0 || config::nvhttp.extra_screens > 0 ||
         (this->virtual_display && config::nvhttp.disable_physical_displays)) {
       BOOST_LOG(info) << "All clients disconnected: ending [" << _app_name << "] to remove the virtual displays and restore the monitors";
       terminate();

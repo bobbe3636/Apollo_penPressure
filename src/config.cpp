@@ -555,6 +555,7 @@ namespace config {
     {},  // vdisplay_broker
     true,  // extra_screens_arrange
     true,  // disable_physical_displays
+    "auto",  // keep_screens
   };
 
   input_t input {
@@ -1242,6 +1243,7 @@ namespace config {
     string_f(vars, "vdisplay_broker", nvhttp.vdisplay_broker);
     bool_f(vars, "extra_screens_arrange", nvhttp.extra_screens_arrange);
     bool_f(vars, "disable_physical_displays", nvhttp.disable_physical_displays);
+    string_restricted_f(vars, "keep_screens", nvhttp.keep_screens, {"auto"sv, "always"sv, "never"sv});
     list_prep_cmd_f(vars, "global_prep_cmd", config::sunshine.prep_cmds);
     list_prep_cmd_f(vars, "global_state_cmd", config::sunshine.state_cmds);
     list_server_cmd_f(vars, "server_cmd", config::sunshine.server_cmds);

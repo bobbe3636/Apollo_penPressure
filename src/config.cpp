@@ -538,6 +538,7 @@ namespace config {
     ENCRYPTION_MODE_OPPORTUNISTIC,  // wan_encryption_mode
 
     true,  // adaptive_bitrate
+    5,  // remote_pacing_ms
   };
 
   nvhttp_t nvhttp {
@@ -1269,6 +1270,7 @@ namespace config {
     path_f(vars, "file_apps", stream.file_apps);
     int_between_f(vars, "fec_percentage", stream.fec_percentage, {1, 255});
     bool_f(vars, "adaptive_bitrate", stream.adaptive_bitrate);
+    int_between_f(vars, "remote_pacing_ms", stream.remote_pacing_ms, {0, 12});
 
     map_int_int_f(vars, "keybindings"s, input.keybindings);
 

@@ -4,8 +4,10 @@
  */
 
 // standard includes
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <fstream>
 #include <future>
 #include <queue>
@@ -1533,22 +1535,9 @@ namespace stream {
       }
 
       try {
-        // How fast a frame's packets go out: on a LAN, around 80% of 1 Gbps. A client streaming
-        // remotely (Moonlight asks for 1024-byte packets over a VPN or the internet) gets them
-        // spread out instead: a VPN tunnel or an office firewall with small buffers drops the
-        // tail of a sub-millisecond burst even at a low average bitrate (over a company VPN, 40%
-        // of the frames were lost at 10 Mbps; Parsec, pacing gently, had no trouble). There a
-        // frame goes out at 4x the stream's bitrate (at least 20 Mbps): about a quarter of an
-        // average frame interval.
+        // How fast a frame's packets go out: on a LAN, around 80% of 1 Gbps, in batches of up to
+        // 64 packets.
         uint64_t pacing_bps = std::giga::num * 80 / 100;
-        if (session->config.packetsize <= 1024 && session->config.monitor.bitrate > 0) {
-          pacing_bps = std::min<uint64_t>(pacing_bps, std::max<uint64_t>(20'000'000, 4ULL * session->config.monitor.bitrate * 1000));
-        }
-        if (pacing_bps != logged_pacing_bps) {
-          BOOST_LOG(info) << "Video pacing: "sv << pacing_bps / 1'000'000 << " Mbps ("sv << session->config.monitor.bitrate / 1000
-                          << " Mbps stream, "sv << session->config.packetsize << "-byte packets)"sv;
-          logged_pacing_bps = pacing_bps;
-        }
         size_t ratecontrol_packets_in_1ms = std::max<size_t>(1, pacing_bps / 1000 / blocksize / 8);
 
         // Send less than 64K in a single batch.
@@ -1560,6 +1549,43 @@ namespace stream {
         // unusually small packet size.
         // Generic Segmentation Offload on Linux can't do more than 64.
         send_batch_size = std::min<size_t>(64, send_batch_size);
+
+        // A client streaming remotely (Moonlight asks for 1024-byte packets over a tunnel or the
+        // internet) gets every frame spread out instead. Links with a small allowance per flow
+        // drop the tail of packets sent back to back, and the repair packets sent right behind
+        // them: the frames lost that way were mostly small ones (20 packets or so), which a
+        // batch of 64 sends in one go whatever the pacing rate. So the packets go out a few at
+        // a time, at the stream's own bitrate (10 to 50 Mbps), or faster for a frame so large
+        // that it would take longer than remote_pacing_ms (a third of a frame interval at most).
+        bool remote_pacing = session->config.packetsize <= 1024 && session->config.monitor.bitrate > 0 &&
+                             config::stream.remote_pacing_ms > 0;
+        if (remote_pacing) {
+          uint64_t floor_bps = std::clamp<uint64_t>(session->config.monitor.bitrate * 1000ULL, 10'000'000, 50'000'000);
+          size_t floor_packets = std::max<size_t>(1, floor_bps / 1000 / blocksize / 8);
+
+          double spread_ms = config::stream.remote_pacing_ms;
+          if (session->config.monitor.encodingFramerate > 0) {
+            spread_ms = std::min(spread_ms, 1'000'000.0 / session->config.monitor.encodingFramerate / 3.0);
+          }
+          size_t frame_packets = payload.size() / blocksize + 1;
+          frame_packets += frame_packets * fecPercentage / 100 + fec_blocks_needed * 2;
+
+          ratecontrol_packets_in_1ms = std::max<size_t>(floor_packets, (size_t) std::ceil(frame_packets / std::max(spread_ms, 1.0)));
+          // About half a millisecond's worth at a time (the timer isn't finer), 4 packets at least
+          send_batch_size = std::clamp<size_t>((ratecontrol_packets_in_1ms + 1) / 2, 4, send_batch_size);
+          pacing_bps = floor_bps;
+        }
+        if (pacing_bps != logged_pacing_bps) {
+          if (remote_pacing) {
+            BOOST_LOG(info) << "Video pacing: remote client, a frame's packets go out over up to "sv << config::stream.remote_pacing_ms
+                            << " ms, at "sv << pacing_bps / 1'000'000 << " Mbps or more ("sv << session->config.monitor.bitrate / 1000
+                            << " Mbps stream, "sv << session->config.packetsize << "-byte packets)"sv;
+          } else {
+            BOOST_LOG(info) << "Video pacing: "sv << pacing_bps / 1'000'000 << " Mbps ("sv << session->config.monitor.bitrate / 1000
+                            << " Mbps stream, "sv << session->config.packetsize << "-byte packets)"sv;
+          }
+          logged_pacing_bps = pacing_bps;
+        }
 
         // Don't ignore the last ratecontrol group of the previous frame
         auto ratecontrol_frame_start = std::max(ratecontrol_next_frame_start, std::chrono::steady_clock::now());
@@ -1663,8 +1689,9 @@ namespace stream {
               // Do pacing within the frame.
               // Also trigger pacing before the first send_batch() of the frame
               // to account for the last send_batch() of the previous frame.
+              // (a remote client: before every batch, which is a few packets)
               if (ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms ||
-                  ratecontrol_frame_packets_sent == 0) {
+                  ratecontrol_frame_packets_sent == 0 || remote_pacing) {
                 auto due = ratecontrol_frame_start +
                            std::chrono::duration_cast<std::chrono::nanoseconds>(1ms) *
                              ratecontrol_frame_packets_sent / ratecontrol_packets_in_1ms;

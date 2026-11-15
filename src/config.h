@@ -177,6 +177,9 @@ namespace config {
 
     // Lower the video bitrate while the network loses frames, back up when it stops
     bool adaptive_bitrate;
+
+    // A remote client: the longest a frame's packets are spread over, in ms (0: sent at once)
+    int remote_pacing_ms;
   };
 
   struct nvhttp_t {

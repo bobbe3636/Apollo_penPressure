@@ -49,6 +49,14 @@ jobs:
             mingw-w64-ucrt-x86_64-toolchain
             mingw-w64-ucrt-x86_64-nlohmann-json
 
+      # CMake 4.5 rejects the CMakeLists of Boost 1.89's locale library (source_group: a folder
+      # that is only a text prefix of a file's path), which the build fetches because MSYS2's
+      # Boost is newer than the one Apollo asks for. The last CMake that builds it:
+      - name: CMake 4.4
+        run: >-
+          pacman -U --noconfirm
+          https://repo.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-cmake-4.4.5-1-any.pkg.tar.zst
+
       # Official Node.js, not MSYS2's (see docs/building.md)
       - name: Setup Node.js
         uses: actions/setup-node@v4

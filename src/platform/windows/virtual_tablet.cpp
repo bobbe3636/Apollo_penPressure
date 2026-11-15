@@ -24,6 +24,7 @@
 
 // standard includes
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -35,6 +36,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -78,7 +80,13 @@ namespace platf::virtual_tablet {
     constexpr int HUION_X_MAX = 32000, HUION_Y_MAX = 20000, HUION_P_MAX = 8191;
     constexpr int HUION_X_MAX_GENERIC = 32767, HUION_Y_MAX_GENERIC = 32767;
     constexpr uint8_t PEN_BUTTON_TERTIARY = 0x04;  // LI_PEN_BUTTON_TERTIARY
-    constexpr size_t MAX_QUEUED_REPORTS = 16;  // motion is merged, so this only holds state changes
+    // Pen samples often arrive several at once (a VPN, the client's coalesced samples). They are
+    // played out a little apart, as a tablet sends them, instead of keeping only the latest: each
+    // is part of the stroke. Only a real backlog (the host can't keep up) merges motion.
+    constexpr size_t MAX_QUEUED_REPORTS = 64;
+    constexpr size_t MOTION_BACKLOG = 24;  // queued reports before motion is merged (about 50 ms)
+    constexpr auto MOTION_SPACING = std::chrono::milliseconds(2);  // between two motion reports of a burst
+    constexpr const char *TOKEN_ENV = "APOLLO_PEN_TOKEN";
 
     // ---------------------------------------------------------------- byte helpers
     void put8(std::vector<uint8_t> &v, uint8_t x) {
@@ -291,7 +299,9 @@ namespace platf::virtual_tablet {
         }
         uint32_t hx = (uint32_t) (x * HUION_X_MAX), hy = (uint32_t) (y * HUION_Y_MAX);
         uint8_t f = 0x80;
-        if (tip) {
+        // This pen has no eraser: the eraser end of the client's pen only hovers (as a tip it drew)
+        bool touching = tip && tool != LI_TOOL_TYPE_ERASER;
+        if (touching) {
           f |= 0x01;
         }
         if (buttons & LI_PEN_BUTTON_PRIMARY) {
@@ -305,7 +315,7 @@ namespace platf::virtual_tablet {
         put8(r, f);
         put16le(r, (uint16_t) hx);
         put16le(r, (uint16_t) hy);
-        put16le(r, tip ? (uint16_t) (pressure * HUION_P_MAX) : 0);
+        put16le(r, touching ? (uint16_t) (pressure * HUION_P_MAX) : 0);
         put8(r, (uint8_t) (hx >> 16));
         put8(r, (uint8_t) (hy >> 16));
         put8(r, 0);  // tilt X, Y: none
@@ -378,6 +388,33 @@ namespace platf::virtual_tablet {
     std::atomic<model_e> g_wanted_model {model_e::intuos};  ///< What available() last found
     uint16_t g_report_seq = 0;
     std::thread g_battery_thread;
+    std::chrono::steady_clock::time_point g_last_delivery {};  ///< The last report Windows took (guarded by g_mutex)
+    std::atomic<bool> g_ready {false};  ///< Windows is taking the tablet's reports (see ready())
+    HANDLE g_ready_event = nullptr;  ///< The same, for the extra screens' processes
+
+    /**
+     * Whether Windows has the tablet plugged in and is asking it for reports, kept in g_ready
+     * and in a named event the extra screens' processes read (caller holds g_mutex). While it
+     * isn't (the first seconds of a stream, a failed attach, the tablet gone), pen input goes
+     * through Windows Ink instead of being lost.
+     */
+    void update_ready_locked() {
+      bool reading = false;
+      if (g_session && g_session->alive) {
+        auto &pending = g_huion && !g_huion_mode ? g_session->pending_ep2 : g_session->pending_in;
+        reading = !pending.empty() || std::chrono::steady_clock::now() - g_last_delivery < std::chrono::seconds(1);
+      }
+      if (reading != g_ready.exchange(reading)) {
+        if (g_ready_event) {
+          reading ? SetEvent(g_ready_event) : ResetEvent(g_ready_event);
+        }
+        BOOST_LOG(info) << "Virtual tablet: "sv << (reading ? "Windows is reading it: pen input goes to the tablet"sv : "not read by Windows: pen input goes through Windows Ink"sv);
+      }
+    }
+
+    std::wstring ready_event_name() {
+      return L"Local\\ApolloTabletReady-" + std::to_wstring(config::input.pen_virtual_tablet_port);
+    }
 
     void set_model_locked(model_e m) {
       g_intuos = m == model_e::intuos;
@@ -517,17 +554,8 @@ namespace platf::virtual_tablet {
                         << (g_stats.buttons & LI_PEN_BUTTON_SECONDARY ? "2 "sv : ""sv) << (g_stats.buttons & PEN_BUTTON_TERTIARY ? "3 "sv : ""sv)
                         << (g_stats.buttons ? ""sv : "none "sv) << (g_stats.eraser ? "+ eraser"sv : ""sv);
 
-        // Mapping check: where the tablet position ends up on screen, and on which monitor
-        POINT cursor {};
-        GetCursorPos(&cursor);
-        MONITORINFOEXW monitor {};
-        monitor.cbSize = sizeof(monitor);
-        GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST), &monitor);
-        char mapping[256];
-        snprintf(mapping, sizeof(mapping), "Virtual tablet: pen at %.3f,%.3f of the tablet -> cursor %ld,%ld on %ls [%ld,%ld %ldx%ld]",
-                 g_stats.last_x, g_stats.last_y, cursor.x, cursor.y, monitor.szDevice, monitor.rcMonitor.left, monitor.rcMonitor.top,
-                 monitor.rcMonitor.right - monitor.rcMonitor.left, monitor.rcMonitor.bottom - monitor.rcMonitor.top);
-        BOOST_LOG(info) << mapping;
+        // (No cursor position here: the cursor doesn't follow a hovering pen reliably, so it
+        // read as a mapping error when there was none)
         g_stats = {};
       }
     }
@@ -565,12 +593,12 @@ namespace platf::virtual_tablet {
         return;  // the Huion's pen out of range: its reports just stop
       }
 
-      // If the host fell behind, the newest position is all that matters: replace a queued
-      // report that differs only in motion (same report ID and tip/button/eraser/range flags)
-      // instead of lining up stale positions. Presses, releases and button changes always
-      // get their own report, so nothing is lost; when the host keeps up this never triggers.
+      // If the host really fell behind (a backlog, not just a burst), the newest position is all
+      // that matters: replace a queued report that differs only in motion (same report ID and
+      // tip/button/eraser/range flags) instead of lining up stale positions. Presses, releases
+      // and button changes always get their own report, so nothing is lost.
       size_t key = g_intuos ? 3 : 2;  // report ID (+ contact count) + flags
-      if (!g_reports.empty()) {
+      if (g_reports.size() >= MOTION_BACKLOG) {
         auto &last = g_reports.back();
         if (last.size() == report.size() && last.size() >= key && std::equal(last.begin(), last.begin() + key, report.begin())) {
           last = std::move(report);
@@ -835,9 +863,12 @@ namespace platf::virtual_tablet {
       auto pending = [&]() -> std::deque<urb_t> & {
         return g_huion && !g_huion_mode ? s->pending_ep2 : s->pending_in;
       };
+      std::vector<uint8_t> last_sent;
+      auto last_sent_at = std::chrono::steady_clock::now();
       while (true) {
         urb_t urb;
         uint32_t ep;
+        size_t key;
         std::vector<uint8_t> report;
         {
           std::unique_lock lk(g_mutex);
@@ -862,7 +893,15 @@ namespace platf::virtual_tablet {
           urb = pending().front();
           pending().pop_front();
           g_stats.delivered++;
+          g_last_delivery = std::chrono::steady_clock::now();
+          key = g_intuos ? 3 : 2;
         }
+        // Motion that arrived in a burst goes out a little apart, as a tablet reports it
+        if (report.size() == last_sent.size() && report.size() >= key && std::equal(report.begin(), report.begin() + key, last_sent.begin())) {
+          std::this_thread::sleep_until(last_sent_at + MOTION_SPACING);
+        }
+        last_sent = report;
+        last_sent_at = std::chrono::steady_clock::now();
         if (report.size() > urb.buflen) {
           report.resize(urb.buflen);
         }
@@ -896,10 +935,12 @@ namespace platf::virtual_tablet {
           } else if (ep == 1 && direction == DIR_IN) {
             std::lock_guard lg(g_mutex);
             s->pending_in.push_back({seqnum, devid, buflen});
+            update_ready_locked();
             g_cv.notify_all();
           } else if (g_huion && ep == 2 && direction == DIR_IN) {
             std::lock_guard lg(g_mutex);
             s->pending_ep2.push_back({seqnum, devid, buflen});
+            update_ready_locked();
             g_cv.notify_all();
           } else if (g_intuos && direction == DIR_IN) {
             // The Intuos Pro's second HID interface: nothing to report, the URB waits until unlinked
@@ -943,6 +984,7 @@ namespace platf::virtual_tablet {
       {
         std::lock_guard lg(g_mutex);
         s->alive = false;
+        update_ready_locked();
         g_cv.notify_all();
       }
       pump.join();
@@ -1054,6 +1096,17 @@ namespace platf::virtual_tablet {
         if (std::memcmp(buf, "VWP1", 4) != 0) {
           continue;
         }
+        // Only our own extra screens: the packet ends with the token they got from us. Without
+        // it any program on this PC could move and click the pen, on the sign-in and UAC screens too.
+        const auto &token = pen_token();
+        if (n < 24 + (int) token.size() || std::memcmp(buf + 24, token.data(), token.size()) != 0) {
+          static bool logged = false;
+          if (!logged) {
+            logged = true;
+            BOOST_LOG(warning) << "Virtual tablet: ignoring pen events from a program that isn't one of our extra screens"sv;
+          }
+          continue;
+        }
         pen_input_t pen {};
         float x, y;
         pen.eventType = (uint8_t) buf[4];
@@ -1104,12 +1157,28 @@ namespace platf::virtual_tablet {
         return false;
       }
 
+      // Its output until it ends, 30 s at most: a usbip.exe that hangs (it has, on a detach) is
+      // ended, instead of keeping the tablet from being plugged in or out for good
       char buf[512];
-      DWORD got;
-      while (ReadFile(read_end, buf, sizeof(buf), &got, nullptr) && got > 0) {
-        output.append(buf, got);
+      DWORD got, waiting;
+      auto deadline = GetTickCount64() + 30000;
+      bool ended = false;
+      while (true) {
+        while (PeekNamedPipe(read_end, nullptr, 0, nullptr, &waiting, nullptr) && waiting > 0 &&
+               ReadFile(read_end, buf, sizeof(buf), &got, nullptr) && got > 0) {
+          output.append(buf, got);
+        }
+        if (ended) {
+          break;
+        }
+        ended = WaitForSingleObject(pi.hProcess, 50) == WAIT_OBJECT_0;  // then once more for the rest
+        if (!ended && GetTickCount64() > deadline) {
+          BOOST_LOG(warning) << "Virtual tablet: usbip.exe didn't finish in 30 s, ending it"sv;
+          TerminateProcess(pi.hProcess, 1);
+          WaitForSingleObject(pi.hProcess, 2000);
+          break;
+        }
       }
-      WaitForSingleObject(pi.hProcess, 30000);
       GetExitCodeProcess(pi.hProcess, &exit_code);
       CloseHandle(pi.hProcess);
       CloseHandle(pi.hThread);
@@ -1266,24 +1335,36 @@ namespace platf::virtual_tablet {
     }
   }  // namespace
 
-  bool available() {
+  /**
+   * Looks for the tablet drivers and usbip-win2, and picks the model. Not on the pen's path: it
+   * asks the service manager and lists the running processes (milliseconds, felt mid-stroke).
+   * Also starts a Wacom service found stopped while a stream wants the tablet (its program had
+   * crashed: the tablet stayed "not connected" until someone restarted the service by hand).
+   */
+  static bool refresh_available() {
     static std::mutex mutex;
-    static std::chrono::steady_clock::time_point checked {};
     static bool wacom = false, huion = false, usbip = false, usable = false, logged = false;
+    static std::chrono::steady_clock::time_point service_started {};
     std::lock_guard lg(mutex);
-    auto now = std::chrono::steady_clock::now();
-    if (logged && now - checked < 10s) {
-      return usable;
-    }
-    checked = now;
 
     bool had_wacom = wacom, had_huion = huion, had_usbip = usbip;
     wacom = false;
     if (SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)) {
       for (const wchar_t *name : {L"WTabletServicePro", L"WTabletServiceCon"}) {
         if (SC_HANDLE service = OpenServiceW(scm, name, SERVICE_QUERY_STATUS)) {
+          SERVICE_STATUS status {};
+          bool stopped = QueryServiceStatus(service, &status) && status.dwCurrentState == SERVICE_STOPPED;
           CloseServiceHandle(service);
           wacom = true;
+          auto now = std::chrono::steady_clock::now();
+          if (stopped && g_running && g_want_plugged && now - service_started > 60s) {
+            service_started = now;
+            if (SC_HANDLE starter = OpenServiceW(scm, name, SERVICE_START)) {
+              bool ok = StartServiceW(starter, 0, nullptr);
+              BOOST_LOG(warning) << "Virtual tablet: the Wacom service was stopped; "sv << (ok ? "started it again"sv : "couldn't start it"sv);
+              CloseServiceHandle(starter);
+            }
+          }
           break;
         }
       }
@@ -1312,6 +1393,65 @@ namespace platf::virtual_tablet {
     return usable;
   }
 
+  bool available() {
+    static std::atomic<bool> usable {false};
+    static std::once_flag once;
+    std::call_once(once, [] {
+      usable = refresh_available();
+      // Again every 10 s, in the background: a driver installed later works from the next stream
+      std::thread([] {
+        for (;;) {
+          std::this_thread::sleep_for(10s);
+          usable = refresh_available();
+        }
+      }).detach();
+    });
+    return usable;
+  }
+
+  bool ready() {
+    if (g_running) {
+      return g_ready;
+    }
+    // Another instance serves the tablet (we're an extra screen): it says so with a named event.
+    // Without the event (an older main instance) it's taken as ready, as before.
+    static HANDLE event = nullptr;
+    static ULONGLONG tried = 0;
+    if (!event && GetTickCount64() - tried > 2000) {
+      tried = GetTickCount64();
+      event = OpenEventW(SYNCHRONIZE, FALSE, ready_event_name().c_str());
+    }
+    return !event || WaitForSingleObject(event, 0) == WAIT_OBJECT_0;
+  }
+
+  const std::array<uint8_t, 16> &pen_token() {
+    static std::array<uint8_t, 16> token {};
+    static std::once_flag once;
+    std::call_once(once, [] {
+      // An extra screen has it from the main instance (in the environment it was started with:
+      // other users' programs can't read that); the main instance makes a new one each run
+      char hex[64] = {};
+      DWORD n = GetEnvironmentVariableA(TOKEN_ENV, hex, sizeof(hex));
+      if (n == token.size() * 2) {
+        for (size_t i = 0; i < token.size(); i++) {
+          char byte[3] = {hex[i * 2], hex[i * 2 + 1], 0};
+          token[i] = (uint8_t) std::strtoul(byte, nullptr, 16);
+        }
+        return;
+      }
+      std::random_device random;
+      std::string text;
+      for (auto &b : token) {
+        b = (uint8_t) random();
+        char byte[3];
+        snprintf(byte, sizeof(byte), "%02x", b);
+        text += byte;
+      }
+      SetEnvironmentVariableA(TOKEN_ENV, text.c_str());
+    });
+    return token;
+  }
+
   void set_plugged(bool plugged) {
     if (!g_running) {
       return;  // the tablet lives in the main instance
@@ -1326,6 +1466,10 @@ namespace platf::virtual_tablet {
     }
     g_stopping = false;
     available();  // finds the drivers and the model
+    pen_token();  // before the extra screens start: they inherit it
+    if (!g_ready_event) {
+      g_ready_event = CreateEventW(nullptr, TRUE, FALSE, ready_event_name().c_str());
+    }
 
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -1372,6 +1516,7 @@ namespace platf::virtual_tablet {
       for (int tick = 1; !g_stopping; ++tick) {
         std::this_thread::sleep_for(1s);
         std::lock_guard lg(g_mutex);
+        update_ready_locked();
         if (g_intuos && tick % 10 == 0 && g_data_mode == 2 && !g_pen.in_range && g_session && g_session->alive &&
             g_reports.size() < MAX_QUEUED_REPORTS) {
           g_reports.push_back({0x13, 100 | 0x80, 0, 0, 0, 0, 0, 0, 0});
@@ -1428,8 +1573,27 @@ namespace platf::virtual_tablet {
     return g_running;
   }
 
-  void submit(const pen_input_t &pen, float x, float y) {
+  void submit(const pen_input_t &pen_event, float x, float y) {
     std::lock_guard lg(g_mutex);
+    pen_input_t pen = pen_event;
+
+    // The other end of the pen while still in range: pens that become an eraser with a button do
+    // that (Windows Ink pens), a Wacom pen can't, it has to be turned around. The Wacom driver
+    // gets what a real tablet sends: the pen leaves, then the other end arrives.
+    bool leaving = pen.eventType == LI_TOUCH_EVENT_HOVER_LEAVE || pen.eventType == LI_TOUCH_EVENT_CANCEL ||
+                   pen.eventType == LI_TOUCH_EVENT_CANCEL_ALL;
+    if (g_intuos && g_pen.in_range && !leaving && pen.toolType != g_pen.tool &&
+        (pen.toolType == LI_TOOL_TYPE_PEN || pen.toolType == LI_TOOL_TYPE_ERASER)) {
+      bool touching = g_pen.tip;
+      g_pen.in_range = false;
+      g_pen.tip = false;
+      g_pen.pressure = 0.0f;
+      queue_report_locked();
+      if (touching && pen.eventType == LI_TOUCH_EVENT_MOVE) {
+        pen.eventType = LI_TOUCH_EVENT_DOWN;  // the new end touches from the start
+      }
+    }
+
     g_pen.apply(pen, x, y);
     g_stats.last_x = x;
     g_stats.last_y = y;

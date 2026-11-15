@@ -1089,11 +1089,11 @@ namespace platf {
    * full pressure resolution, tilt, both barrel buttons, hover and Wintab — none of which
    * Windows Ink injection provides. The packet mirrors LiSendPenEvent, little-endian:
    * "VWP1", eventType, toolType, penButtons, pad, x, y, pressureOrDistance (float32),
-   * rotation (uint16), tilt, pad — 24 bytes.
+   * rotation (uint16), tilt, pad — 24 bytes, then the main instance's 16-byte token.
    *
-   * With pen_virtual_tablet_desktop, x/y are rescaled from this stream's display to the whole
-   * virtual desktop, so one virtual tablet mapped to "All Displays" serves every Apollo instance
-   * (one per screen) and the pen crosses between screens seamlessly.
+   * x/y are rescaled from this stream's display to the whole desktop, which the tablet driver
+   * maps the virtual tablet to: one tablet serves every Apollo instance (one per screen) and
+   * the pen crosses between screens seamlessly.
    * @param touch_port This stream's display, in desktop pixels.
    * @param pen The pen event.
    */
@@ -1117,7 +1117,7 @@ namespace platf {
       return;
     }
 
-    // Another instance serves it (an extra screen, or an external vwacom): send over UDP
+    // The main instance serves it (we're an extra screen): send over UDP
     static SOCKET sock = INVALID_SOCKET;
     static sockaddr_in dest {};
 
@@ -1135,7 +1135,10 @@ namespace platf {
       BOOST_LOG(info) << "Virtual tablet: forwarding pen input to udp 127.0.0.1:"sv << config::input.pen_virtual_tablet_port;
     }
 
-    char pkt[24] = {'V', 'W', 'P', '1'};
+    // The 24 bytes above, then the token the main instance gave its extra screens
+    const auto &token = virtual_tablet::pen_token();
+    char pkt[24 + 16] = {'V', 'W', 'P', '1'};
+    std::memcpy(pkt + 24, token.data(), token.size());
     pkt[4] = (char) pen.eventType;
     pkt[5] = (char) pen.toolType;
     pkt[6] = (char) pen.penButtons;
@@ -1171,15 +1174,42 @@ namespace platf {
     return screen == chosen;
   }
 
+  static void pen_update_ink(client_input_raw_t *raw, const touch_port_t &touch_port, const pen_input_t &pen);
+
   void pen_update(client_input_t *input, const touch_port_t &touch_port, const pen_input_t &pen) {
     auto raw = (client_input_raw_t *) input;
 
-    // The virtual Wacom when this PC has what it needs (Wacom driver, usbip-win2), else Windows Ink
-    if (config::input.pen_virtual_tablet && virtual_tablet::available() && pen_goes_to_virtual_tablet()) {
+    // The virtual tablet when this PC has what it needs (a tablet driver, usbip-win2) and Windows
+    // is reading it, else Windows Ink. It isn't read for the first seconds of a stream (it's
+    // plugged in once the screens have settled) or when plugging it in failed: the pen was dead
+    // meanwhile. A touch stays on the path it started on; the path left sees the pen leave.
+    bool want_tablet = config::input.pen_virtual_tablet && virtual_tablet::available() && pen_goes_to_virtual_tablet() &&
+                       virtual_tablet::ready();
+    static bool via_tablet = false, touching = false;  // input thread only
+    bool mid_touch = touching && (pen.eventType == LI_TOUCH_EVENT_MOVE || pen.eventType == LI_TOUCH_EVENT_UP);
+    if (want_tablet != via_tablet && !mid_touch) {
+      pen_input_t leave = pen;
+      leave.eventType = LI_TOUCH_EVENT_HOVER_LEAVE;
+      if (via_tablet) {
+        forward_pen_to_virtual_tablet(touch_port, leave);
+      } else if (raw->pen) {
+        pen_update_ink(raw, touch_port, leave);
+      }
+      via_tablet = want_tablet;
+    }
+    if (pen.eventType != LI_TOUCH_EVENT_BUTTON_ONLY) {
+      touching = pen.eventType == LI_TOUCH_EVENT_DOWN || pen.eventType == LI_TOUCH_EVENT_MOVE;
+    }
+
+    if (via_tablet) {
       forward_pen_to_virtual_tablet(touch_port, pen);
       return;
     }
+    pen_update_ink(raw, touch_port, pen);
+  }
 
+  /// The Windows Ink pen (a synthetic pointer device): no tablet driver needed, less of the pen
+  static void pen_update_ink(client_input_raw_t *raw, const touch_port_t &touch_port, const pen_input_t &pen) {
     // Bail if we're not running on an OS that supports virtual pen input
     if (!raw->global->fnCreateSyntheticPointerDevice ||
         !raw->global->fnInjectSyntheticPointerInput ||

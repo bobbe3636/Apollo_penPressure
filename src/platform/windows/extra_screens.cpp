@@ -6,7 +6,10 @@
 #include <Windows.h>
 
 // standard includes
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <set>
@@ -23,6 +26,11 @@
 #include "src/logging.h"
 
 namespace fs = std::filesystem;
+
+// virtual_tablet.h (not included: it brings in the platform header, which wants winsock first)
+namespace platf::virtual_tablet {
+  const std::array<std::uint8_t, 16> &pen_token();
+}
 
 namespace platf::extra_screens {
   using namespace std::literals;
@@ -263,6 +271,10 @@ namespace platf::extra_screens {
     }
 
     void monitor() {
+      // An extra screen that keeps exiting is started again less and less often (2 s, then
+      // doubling up to a minute); one that ran for 2 minutes starts over at 2 s
+      std::vector<DWORD> restart_delay(g_children.size(), 2000);
+      std::vector<ULONGLONG> started(g_children.size(), GetTickCount64());
       while (true) {
         std::vector<HANDLE> handles {g_stop_event};
         for (auto &c : g_children) {
@@ -275,19 +287,23 @@ namespace platf::extra_screens {
           return;
         }
         // Restart any extra screen that exited (or never started)
-        for (auto &c : g_children) {
+        for (size_t i = 0; i < g_children.size(); i++) {
+          auto &c = g_children[i];
           if (c.process && WaitForSingleObject(c.process, 0) == WAIT_OBJECT_0) {
             DWORD code = 0;
             GetExitCodeProcess(c.process, &code);
             CloseHandle(c.process);
             c.process = nullptr;
-            BOOST_LOG(warning) << "Extra screen "sv << c.screen << ": exited ("sv << code << "), restarting"sv;
+            restart_delay[i] = GetTickCount64() - started[i] > 120000 ? 2000 : (std::min<DWORD>)(restart_delay[i] * 2, 60000);
+            BOOST_LOG(warning) << "Extra screen "sv << c.screen << ": exited ("sv << code << "), restarting in "sv
+                               << restart_delay[i] / 1000 << " s"sv;
           }
           if (!c.process) {
-            if (WaitForSingleObject(g_stop_event, 2000) == WAIT_OBJECT_0) {
+            if (WaitForSingleObject(g_stop_event, restart_delay[i]) == WAIT_OBJECT_0) {
               return;
             }
             launch(c);
+            started[i] = GetTickCount64();
             save_pids();
           }
         }
@@ -317,6 +333,9 @@ namespace platf::extra_screens {
     // Cintiq, set to "All displays"): that mapping doesn't depend on which (virtual) monitor is
     // which, which changes between connections
     config::input.pen_virtual_tablet_desktop = true;
+
+    // The extra screens inherit the token their pen events must carry (in our environment)
+    platf::virtual_tablet::pen_token();
 
     g_job = CreateJobObjectW(nullptr, nullptr);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits {};

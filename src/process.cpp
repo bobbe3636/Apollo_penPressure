@@ -774,8 +774,13 @@ namespace proc {
 
   void proc_t::pause() {
 #ifdef _WIN32
-    // All clients left: unplug the virtual Wacom, so the office tablet (or Parsec's) is alone
-    platf::virtual_tablet::set_plugged(false);
+    // All clients left: unplug the virtual tablet, so the office tablet (or Parsec's) is alone.
+    // With the screens kept it stays, like them: nothing changes on the PC for the apps left
+    // open (some only find a tablet when they start), and the pen works at once on reconnecting.
+    // Quit unplugs it (terminate()).
+    if (!(running() && !_app.terminate_on_pause && keep_screens_on_disconnect() && this->virtual_display)) {
+      platf::virtual_tablet::set_plugged(false);
+    }
 #endif
 
     if (!running()) {
@@ -857,6 +862,12 @@ namespace proc {
   void proc_t::terminate(bool immediate, bool needs_refresh) {
     std::error_code ec;
     placebo = false;
+
+#ifdef _WIN32
+    // The app ends (quit, or a disconnect that doesn't keep the screens): the virtual tablet
+    // goes too. A stream starting right after plugs it in again (the latest wish wins).
+    platf::virtual_tablet::set_plugged(false);
+#endif
 
     if (!immediate) {
       terminate_process_group(_process, _process_group, _app.exit_timeout);

@@ -4,6 +4,9 @@
  */
 #pragma once
 
+#include <array>
+#include <cstdint>
+
 #include "src/platform/common.h"
 
 namespace platf::virtual_tablet {
@@ -24,6 +27,20 @@ namespace platf::virtual_tablet {
    * the next stream; also picks the model for pen_virtual_tablet_model "auto".
    */
   bool available();
+
+  /**
+   * @brief True while Windows has the tablet plugged in and takes its reports. Until then (the
+   * first seconds of a stream, a failed attach) pen input goes through Windows Ink instead of
+   * being lost. In an extra screen's instance: what the main instance says.
+   */
+  bool ready();
+
+  /**
+   * @brief What pen events sent to the main instance over UDP must end with: made by the main
+   * instance each run and handed to its extra screens in their environment, so no other program
+   * on the PC can feed the tablet.
+   */
+  const std::array<std::uint8_t, 16> &pen_token();
 
   /**
    * @brief Stop serving the tablet (the Wacom driver sees it unplugged).

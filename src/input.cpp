@@ -1347,9 +1347,10 @@ namespace input {
    * @return The status of the batching operation.
    */
   batch_result_e batch(PSS_PEN_PACKET dest, PSS_PEN_PACKET src) {
-    // Only batch hover or move events
-    if (dest->eventType != LI_TOUCH_EVENT_MOVE &&
-        dest->eventType != LI_TOUCH_EVENT_HOVER) {
+    // Only hover events are batched. A pen that touches is drawing: every sample is part of the
+    // stroke's shape and pressure, and packets often arrive several at once (a VPN, or the
+    // client's own coalesced samples). Taking only the latest made fast curves angular.
+    if (dest->eventType != LI_TOUCH_EVENT_HOVER) {
       return batch_result_e::terminate_batch;
     }
 

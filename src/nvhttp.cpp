@@ -7,6 +7,7 @@
 
 // standard includes
 #include <filesystem>
+#include <mutex>
 #include <format>
 #include <string>
 #include <utility>
@@ -373,14 +374,14 @@ namespace nvhttp {
    * @brief Extra screens (companion instances) trust exactly the devices paired with the main
    * instance: replace this instance's devices with the ones in paired_devices_file.
    */
-  void load_shared_devices() {
+  bool load_shared_devices() {
     nlohmann::json tree;
     try {
       std::ifstream in(config::nvhttp.paired_devices_file);
       in >> tree;
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "Couldn't read paired devices from "sv << config::nvhttp.paired_devices_file << ": "sv << e.what();
-      return;
+      return false;
     }
 
     client_t client;
@@ -396,12 +397,30 @@ namespace nvhttp {
     }
     client_root = client;
     BOOST_LOG(info) << "Trusting "sv << client.named_devices.size() << " device(s) paired with the main instance"sv;
+    return true;
+  }
+
+  // An extra screen's devices are read again whenever the main instance's file changes, before a
+  // device is checked: one paired since is accepted, and one removed there is refused here too
+  // (it stayed trusted until Apollo restarted). One connection at a time: the list is replaced.
+  std::mutex shared_devices_mutex;
+
+  void refresh_shared_devices(bool force = false) {
+    static fs::file_time_type loaded_time {};
+    std::error_code ec;
+    auto time = fs::last_write_time(config::nvhttp.paired_devices_file, ec);
+    if (force || (!ec && time != loaded_time)) {
+      if (load_shared_devices() && !ec) {
+        loaded_time = time;
+      }
+    }
   }
 
   void load_state() {
     load_own_state();
     if (!config::nvhttp.paired_devices_file.empty()) {
-      load_shared_devices();
+      std::lock_guard lg(shared_devices_mutex);
+      refresh_shared_devices(true);
     }
   }
 
@@ -1837,12 +1856,13 @@ namespace nvhttp {
 
       });
 
-      auto err_str = cert_chain.verify(x509.get(), named_cert_p);
-      if (err_str && !config::nvhttp.paired_devices_file.empty()) {
-        // An extra screen: the device may have been paired with the main instance since we loaded
-        load_shared_devices();
-        err_str = cert_chain.verify(x509.get(), named_cert_p);
+      std::unique_lock<std::mutex> shared_lock;
+      if (!config::nvhttp.paired_devices_file.empty()) {
+        // An extra screen: the devices paired with the main instance, as they are now
+        shared_lock = std::unique_lock(shared_devices_mutex);
+        refresh_shared_devices();
       }
+      auto err_str = cert_chain.verify(x509.get(), named_cert_p);
       if (err_str) {
         BOOST_LOG(warning) << "SSL Verification error :: "sv << err_str;
         return verified;

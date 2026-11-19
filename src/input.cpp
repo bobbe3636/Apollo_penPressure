@@ -562,6 +562,21 @@ namespace input {
 
     auto release = util::endian::little(packet->header.magic) == MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5;
     auto button = util::endian::big(packet->button);
+
+    // A left press while the previous left release is still held back (below): that release goes
+    // first. Two clicks close together often arrive bunched over a slow link (well within 10 ms),
+    // and the held-back release then never happened: the wait it left behind stayed set for the
+    // rest of the session, and from then on every right press went out as an instant click (down
+    // and up at once), so nothing could be dragged with the right button (Alt + right drag in Maya)
+    // until the client reconnected.
+    if (button == BUTTON_LEFT && !release && input->mouse_left_button_timeout > DISABLE_LEFT_BUTTON_DELAY) {
+      task_pool.cancel(input->mouse_left_button_timeout);
+      input->mouse_left_button_timeout = ENABLE_LEFT_BUTTON_DELAY;
+      if (mouse_press[BUTTON_LEFT] == false) {
+        platf::button_mouse(platf_input, BUTTON_LEFT, true);
+      }
+    }
+
     if (button > 0 && button < mouse_press.size()) {
       if (mouse_press[button] != release) {
         // button state is already what we want
@@ -586,15 +601,16 @@ namespace input {
      */
     if (button == BUTTON_LEFT && release && !input->mouse_left_button_timeout) {
       auto f = [=]() {
-        auto left_released = mouse_press[BUTTON_LEFT];
-        if (left_released) {
-          // Already released left button
+        // The wait is over, whatever happens below (returning early used to leave it set)
+        input->mouse_left_button_timeout = ENABLE_LEFT_BUTTON_DELAY;
+
+        if (mouse_press[BUTTON_LEFT]) {
+          // Pressed again meanwhile: that press's release comes later
           return;
         }
         platf::button_mouse(platf_input, BUTTON_LEFT, release);
 
         mouse_press[BUTTON_LEFT] = false;
-        input->mouse_left_button_timeout = nullptr;
       };
 
       input->mouse_left_button_timeout = task_pool.pushDelayed(std::move(f), 10ms).task_id;

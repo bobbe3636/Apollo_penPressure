@@ -385,7 +385,8 @@ namespace crypto {
     const ASN1_BIT_STRING *asn1 = nullptr;
     X509_get0_signature(&asn1, nullptr, x.get());
 
-    return {(const char *) asn1->data, (std::size_t) asn1->length};
+    // Through the accessors: the structure is opaque in OpenSSL 4
+    return {(const char *) ASN1_STRING_get0_data(asn1), (std::size_t) ASN1_STRING_length(asn1)};
   }
 
   std::string rand(std::size_t bytes) {
@@ -455,10 +456,14 @@ namespace crypto {
 
     X509_set_pubkey(x509.get(), pkey.get());
 
-    auto name = X509_get_subject_name(x509.get());
+    // A name of our own, set as subject and issuer (both copy it): the certificate's own name
+    // can't be changed in place in OpenSSL 4 (X509_get_subject_name() returns it const)
+    X509_NAME *name = X509_NAME_new();
     X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (const std::uint8_t *) cn.data(), cn.size(), -1, 0);
 
+    X509_set_subject_name(x509.get(), name);
     X509_set_issuer_name(x509.get(), name);
+    X509_NAME_free(name);
     X509_sign(x509.get(), pkey.get(), EVP_sha256());
 
     return {pem(x509), pem(pkey)};

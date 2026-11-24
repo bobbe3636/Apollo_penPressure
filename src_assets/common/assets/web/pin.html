@@ -29,6 +29,16 @@
     </ul>
     <form v-if="currentTab === '#PIN'" class="form d-flex flex-column align-items-center" id="form" @submit.prevent="registerDevice">
       <div class="card flex-column d-flex p-4 mb-4">
+        <div class="w-100 mb-2">
+          <div v-if="pendingPairings.length === 0" class="text-muted small">{{ $t('pin.pending_none') }}</div>
+          <template v-else>
+            <div class="small mb-1">{{ $t('pin.pending_choose') }}</div>
+            <div class="form-check" v-for="p in pendingPairings" :key="p.id">
+              <input class="form-check-input" type="radio" name="pending-pairing" :id="'pending-' + p.id" :value="p.id" v-model="selectedPairing" />
+              <label class="form-check-label" :for="'pending-' + p.id">{{ p.name || $t('pin.unpair_single_unknown') }} <span class="text-muted">({{ p.address }})</span></label>
+            </div>
+          </template>
+        </div>
         <input type="text" pattern="\d*" :placeholder="`${$t('navbar.pin')}`" autofocus id="pin-input" class="form-control mt-2" required />
         <input type="text" :placeholder="`${$t('pin.device_name')}`" id="name-input" class="form-control my-4" />
         <button class="btn btn-primary">{{ $t('pin.send') }}</button>
@@ -352,6 +362,7 @@
   ];
 
   let currentEditingClient = null;
+  let pendingTimer = null;
 
   const data = () => {
     return {
@@ -370,7 +381,9 @@
       clients: [],
       showApplyMessage: false,
       unpairAllPressed: false,
-      unpairAllStatus: null
+      unpairAllStatus: null,
+      pendingPairings: [],
+      selectedPairing: ''
     }
   }
 
@@ -396,6 +409,11 @@
     },
     created() {
       this.refreshClients();
+      // The devices waiting to pair, while the PIN tab is open
+      this.refreshPending();
+      pendingTimer = setInterval(() => {
+        if (this.currentTab === '#PIN') this.refreshPending();
+      }, 2000);
     },
     methods: {
       switchTab(currentTab) {
@@ -415,11 +433,30 @@
         this.editingHost = false;
         saveHostCache(this, true);
       },
+      refreshPending() {
+        fetch("./api/pin/pending", { credentials: 'include' })
+          .then((r) => r.json())
+          .then((r) => {
+            const list = (r && r.status && Array.isArray(r.pending)) ? r.pending : [];
+            this.pendingPairings = list;
+            if (!list.some((p) => p.id === this.selectedPairing)) {
+              this.selectedPairing = list.length === 1 ? list[0].id : '';
+            }
+          })
+          .catch(() => {});
+      },
       registerDevice(e) {
         let pin = document.querySelector("#pin-input").value;
         let name = document.querySelector("#name-input").value;
         document.querySelector("#status").innerHTML = "";
-        let b = JSON.stringify({pin: pin, name: name});
+        // The PIN goes to exactly the device chosen: with several waiting, one must be picked
+        if (this.pendingPairings.length > 1 && !this.selectedPairing) {
+          document.querySelector(
+            "#status"
+          ).innerHTML = `<div class="alert alert-danger" role="alert">${this.i18n.t('pin.pending_choose_first')}</div>`;
+          return;
+        }
+        let b = JSON.stringify({pin: pin, name: name, id: this.selectedPairing});
         fetch("./api/pin", {
           credentials: 'include',
           headers: {
@@ -438,6 +475,7 @@
               document.querySelector("#name-input").value = "";
 
               setTimeout(() => this.refreshClients(), 1000);
+              this.refreshPending();
 
               alert(this.i18n.t('pin.pair_success_check_perm'));
             } else {

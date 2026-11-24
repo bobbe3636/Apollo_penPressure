@@ -1290,12 +1290,44 @@ namespace confighttp {
       nlohmann::json output_tree;
       std::string pin = input_tree.value("pin", "");
       std::string name = input_tree.value("name", "");
-      output_tree["status"] = nvhttp::pin(pin, name);
+      // The pairing request the page chose (see getPendingPairings)
+      std::string id = input_tree.value("id", "");
+      output_tree["status"] = nvhttp::pin(pin, name, id);
       send_response(response, output_tree);
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "SavePin: "sv << e.what();
       bad_request(response, request, e.what());
     }
+  }
+
+  /**
+   * @brief The pairing requests waiting for a PIN: the PIN page lists them (device name, address)
+   * and sends the PIN for exactly the one chosen.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   *
+   * @api_examples{/api/pin/pending| GET| null}
+   */
+  void getPendingPairings(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    nlohmann::json pending = nlohmann::json::array();
+    for (const auto &pairing : nvhttp::get_pending_pairings()) {
+      pending.push_back({
+        {"id", pairing.id},
+        {"name", pairing.name},
+        {"address", pairing.address},
+        {"seconds_left", pairing.seconds_left},
+      });
+    }
+    nlohmann::json output_tree;
+    output_tree["pending"] = pending;
+    output_tree["status"] = true;
+    send_response(response, output_tree);
   }
 
   /**
@@ -1532,6 +1564,7 @@ namespace confighttp {
     server.resource["^/troubleshooting/?$"]["GET"] = getTroubleshootingPage;
     server.resource["^/api/login"]["POST"] = login;
     server.resource["^/api/pin$"]["POST"] = savePin;
+    server.resource["^/api/pin/pending$"]["GET"] = getPendingPairings;
     server.resource["^/api/otp$"]["POST"] = getOTP;
     server.resource["^/api/apps$"]["GET"] = getApps;
     server.resource["^/api/apps$"]["POST"] = saveApp;

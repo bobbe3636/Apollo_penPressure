@@ -9,6 +9,7 @@
 #include <string>
 #include <chrono>
 #include <list>
+#include <vector>
 
 // lib includes
 #include <boost/property_tree/ptree.hpp>
@@ -119,12 +120,30 @@ namespace nvhttp {
         std::shared_ptr<typename SimpleWeb::ServerBase<SunshineHTTPS>::Response>>
         response;
       std::string salt = {};
+      std::string id = {};  ///< Random id of this request: the PIN page approves exactly this one
+      std::string address = {};  ///< Where the request came from (shown on the PIN page)
+      std::chrono::steady_clock::time_point expires_at = {};  ///< Unfinished by then: it ends
     } async_insert_pin;
 
     /**
      * @brief used as a security measure to prevent out of order calls
      */
     PAIR_PHASE last_phase = PAIR_PHASE::NONE;
+
+    /**
+     * @brief A step failed: the session ends once that step's reply is written
+     */
+    bool failed = false;
+  };
+
+  /**
+   * @brief A pairing request waiting for its PIN, as the PIN page lists it.
+   */
+  struct pending_pairing_t {
+    std::string id;
+    std::string name;
+    std::string address;
+    int seconds_left;
   };
 
   /**
@@ -193,7 +212,12 @@ namespace nvhttp {
    * bool pin_status = nvhttp::pin("1234", "laptop");
    * @examples_end
    */
-  bool pin(std::string pin, std::string name);
+  bool pin(std::string pin, std::string name, const std::string &pairing_id = {});
+
+  /**
+   * @brief The pairing requests waiting for a PIN (the PIN page shows them, to approve exactly one).
+   */
+  std::vector<pending_pairing_t> get_pending_pairings();
 
   std::string request_otp(const std::string& passphrase, const std::string& deviceName);
 

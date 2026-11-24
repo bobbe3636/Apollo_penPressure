@@ -22,6 +22,7 @@ extern "C" {
 #include "display.h"
 #include "misc.h"
 #include "src/config.h"
+#include "src/cursor_share.h"
 #include "src/logging.h"
 #include "src/nvenc/nvenc_config.h"
 #include "src/nvenc/nvenc_d3d11_native.h"
@@ -1186,6 +1187,8 @@ namespace platf::dxgi {
         return capture_e::error;
       }
 
+      share_pointer_shape(std::begin(img_data), img_data.size(), shape_info);
+
       auto alpha_cursor_img = make_cursor_alpha_image(img_data, shape_info);
       auto xor_cursor_img = make_cursor_xor_image(img_data, shape_info);
 
@@ -1199,9 +1202,12 @@ namespace platf::dxgi {
       cursor_alpha.set_pos(frame_info.PointerPosition.Position.x, frame_info.PointerPosition.Position.y, width, height, display_rotation, frame_info.PointerPosition.Visible);
 
       cursor_xor.set_pos(frame_info.PointerPosition.Position.x, frame_info.PointerPosition.Position.y, width, height, display_rotation, frame_info.PointerPosition.Visible);
+
+      share_pointer_state(frame_info.PointerPosition);
     }
 
-    const bool blend_mouse_cursor_flag = (cursor_alpha.visible || cursor_xor.visible) && cursor_visible;
+    // A client that draws the pointer itself gets the picture without it
+    const bool blend_mouse_cursor_flag = (cursor_alpha.visible || cursor_xor.visible) && cursor_visible && !cursor_share::client_draws();
 
     texture2d_t src {};
     if (frame_update_flag) {

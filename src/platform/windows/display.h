@@ -81,6 +81,13 @@ namespace platf::dxgi {
     bool visible;
   };
 
+  /**
+   * @brief The pointer's shape and visibility from desktop duplication, for clients that draw the
+   * pointer themselves (src/cursor_share.h).
+   */
+  void share_pointer_shape(const std::uint8_t *data, std::size_t size, const DXGI_OUTDUPL_POINTER_SHAPE_INFO &shape_info);
+  void share_pointer_state(const DXGI_OUTDUPL_POINTER_POSITION &position);
+
   class gpu_cursor_t {
   public:
     gpu_cursor_t():

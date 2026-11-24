@@ -27,6 +27,7 @@ extern "C" {
 // local includes
 #include "config.h"
 #include "crypto.h"
+#include "cursor_share.h"
 #include "display_device.h"
 #include "globals.h"
 #include "input.h"
@@ -58,6 +59,7 @@ extern "C" {
 #define IDX_SET_CLIPBOARD 16
 #define IDX_FILE_TRANSFER_NONCE_REQUEST 17
 #define IDX_SET_ADAPTIVE_TRIGGERS 18
+#define IDX_CURSOR_MODE 19
 
 static const short packetTypes[] = {
   0x0305,  // Start A
@@ -79,7 +81,12 @@ static const short packetTypes[] = {
   0x3001,  // Set Clipboard (Apollo protocol extension)
   0x3002,  // File transfer nonce request (Apollo protocol extension)
   0x5503,  // Set Adaptive triggers (Sunshine protocol extension)
+  0x7C03,  // Client draws the host's pointer itself (vwacom extension)
 };
+
+// Host to client (vwacom extension): the host's pointer, for clients that draw it themselves
+constexpr std::uint16_t CURSOR_SHAPE_TYPE = 0x7C01;
+constexpr std::uint16_t CURSOR_STATE_TYPE = 0x7C02;
 
 namespace asio = boost::asio;
 namespace sys = boost::system;
@@ -222,6 +229,32 @@ namespace stream {
 
     // Sunshine protocol extension
     SS_HDR_METADATA metadata;
+  };
+
+  // A piece of the pointer's shape (data follows; pieces in order, offset 0 first)
+  struct control_cursor_shape_t {
+    control_header_v2 header;
+
+    std::uint32_t serial;  // new for each different shape
+    std::uint8_t kind;  // 1 monochrome (AND rows, then XOR rows), 2 BGRA, 4 BGRA with XOR where alpha is 0xFF
+    std::uint8_t reserved;
+    std::uint16_t width;
+    std::uint16_t height;  // the pointer's rows (monochrome data has twice as many)
+    std::uint16_t pitch;  // bytes per data row
+    std::int16_t hot_x;
+    std::int16_t hot_y;
+    std::uint32_t total_size;
+    std::uint32_t offset;
+  };
+
+  struct control_cursor_state_t {
+    control_header_v2 header;
+
+    std::uint8_t flags;  // 0x01 shown on this screen, 0x02 shown on the desktop (not here: on another screen)
+    std::uint8_t reserved[3];
+    std::uint32_t serial;  // the shape that goes with it
+    std::int32_t x;  // the pointer image's top left on this screen
+    std::int32_t y;
   };
 
   typedef struct control_encrypted_t {
@@ -427,6 +460,24 @@ namespace stream {
       platf::feedback_queue_t feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
     } control;
+
+    // The client draws the host's pointer itself (IDX_CURSOR_MODE): the pointer's shape and
+    // visibility go to it, and the picture leaves the pointer out meanwhile
+    struct cursor_client_t {
+      std::atomic<bool> requested {false};
+      std::uint64_t sent_generation = 0;
+      std::uint32_t sent_serial = 0;
+
+      void stop() {
+        if (requested.exchange(false)) {
+          cursor_share::remove_client();
+        }
+      }
+
+      ~cursor_client_t() {
+        stop();
+      }
+    } cursor;
 
     std::uint32_t launch_session_id;
     std::string device_name;
@@ -956,6 +1007,79 @@ namespace stream {
     return 0;
   }
 
+  /**
+   * @brief The host's pointer to a client that draws it itself: its shape when it changed (in
+   * pieces that fit a control message), then whether it is shown.
+   * @return 0 on success or nothing to send.
+   */
+  int send_cursor(session_t *session) {
+    std::uint64_t generation;
+    std::shared_ptr<const cursor_share::shape_t> shape;
+    cursor_share::state_t state;
+    if (!session->control.peer || !cursor_share::get(generation, shape, state) || generation == session->cursor.sent_generation) {
+      return 0;
+    }
+
+    constexpr std::size_t piece_max = 30000;
+    using encrypted_t = std::array<std::uint8_t, sizeof(control_encrypted_t) + crypto::cipher::round_to_pkcs7_padded(sizeof(control_cursor_shape_t) + piece_max) + crypto::cipher::tag_size>;
+
+    auto send = [&](const std::string_view &plaintext) {
+      auto encrypted = std::make_unique<encrypted_t>();
+      auto payload = encode_control(session, plaintext, *encrypted);
+      if (payload.empty() || session->broadcast_ref->control_server.send(payload, session->control.peer)) {
+        // Tried again on the next round (every few ms): a few lines only
+        static std::atomic<int> logged {0};
+        if (logged++ < 5) {
+          BOOST_LOG(warning) << "Couldn't send the pointer to the client"sv;
+        }
+        return false;
+      }
+      return true;
+    };
+
+    if (shape && shape->serial != session->cursor.sent_serial) {
+      std::size_t total = shape->data.size();
+      std::size_t offset = 0;
+      do {
+        std::size_t length = std::min(piece_max, total - offset);
+        std::string plaintext(sizeof(control_cursor_shape_t) + length, '\0');
+        control_cursor_shape_t header {};
+        header.header.type = CURSOR_SHAPE_TYPE;
+        header.header.payloadLength = util::endian::little<std::uint16_t>(plaintext.size() - sizeof(control_header_v2));
+        header.serial = util::endian::little(shape->serial);
+        header.kind = (std::uint8_t) shape->kind;
+        header.width = util::endian::little(shape->width);
+        header.height = util::endian::little(shape->height);
+        header.pitch = util::endian::little(shape->pitch);
+        header.hot_x = util::endian::little(shape->hot_x);
+        header.hot_y = util::endian::little(shape->hot_y);
+        header.total_size = util::endian::little<std::uint32_t>(total);
+        header.offset = util::endian::little<std::uint32_t>(offset);
+        std::memcpy(plaintext.data(), &header, sizeof(header));
+        std::memcpy(plaintext.data() + sizeof(header), shape->data.data() + offset, length);
+        if (!send(plaintext)) {
+          return -1;
+        }
+        offset += length;
+      } while (offset < total);
+      session->cursor.sent_serial = shape->serial;
+    }
+
+    control_cursor_state_t message {};
+    message.header.type = CURSOR_STATE_TYPE;
+    message.header.payloadLength = sizeof(message) - sizeof(control_header_v2);
+    message.flags = (state.here ? 0x01 : 0) | (state.shown ? 0x02 : 0);
+    message.serial = util::endian::little<std::uint32_t>(shape ? shape->serial : 0);
+    message.x = util::endian::little<std::int32_t>(state.x);
+    message.y = util::endian::little<std::int32_t>(state.y);
+    if (!send(std::string_view {(const char *) &message, sizeof(message)})) {
+      return -1;
+    }
+
+    session->cursor.sent_generation = generation;
+    return 0;
+  }
+
   void controlBroadcastThread(control_server_t *server) {
     server->map(packetTypes[IDX_PERIODIC_PING], [](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_PERIODIC_PING]"sv;
@@ -1107,6 +1231,24 @@ namespace stream {
       }
     });
 
+    // The client draws the host's pointer itself (1) or no longer (0)
+    server->map(packetTypes[IDX_CURSOR_MODE], [](session_t *session, const std::string_view &payload) {
+      if (payload.empty()) {
+        return;
+      }
+      if (payload[0] & 0x01) {
+        if (!session->cursor.requested.exchange(true)) {
+          cursor_share::add_client();
+          session->cursor.sent_generation = 0;  // the current pointer goes out at once
+          session->cursor.sent_serial = 0;
+          BOOST_LOG(info) << "Pointer: the client draws it, the picture leaves it out"sv;
+        }
+      } else if (session->cursor.requested) {
+        session->cursor.stop();
+        BOOST_LOG(info) << "Pointer: back in the picture"sv;
+      }
+    });
+
     server->map(packetTypes[IDX_ENCRYPTED], [server](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_ENCRYPTED]"sv;
 
@@ -1201,6 +1343,7 @@ namespace stream {
     auto broadcast_shutdown_event = mail::man->event<bool>(mail::broadcast_shutdown);
     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
       bool has_session_awaiting_peer = false;
+      bool has_cursor_client = false;
 
       {
         auto lg = server->_sessions.lock();
@@ -1223,6 +1366,9 @@ namespace stream {
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
             pos = server->_sessions->erase(pos);
+
+            // The pointer goes back into the picture once no client draws it
+            session->cursor.stop();
 
             if (session->control.peer) {
               {
@@ -1256,6 +1402,11 @@ namespace stream {
 
               send_hdr_mode(session, std::move(hdr_info));
             }
+
+            if (session->cursor.requested) {
+              has_cursor_client = true;
+              send_cursor(session);
+            }
           }
 
           ++pos;
@@ -1268,7 +1419,8 @@ namespace stream {
         break;
       }
 
-      server->iterate(150ms);
+      // A pointer change waits at most this long for the client that draws it
+      server->iterate(has_cursor_client ? 8ms : 150ms);
     }
 
     // Let all remaining connections know the server is shutting down

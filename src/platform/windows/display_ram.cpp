@@ -5,6 +5,7 @@
 // local includes
 #include "display.h"
 #include "misc.h"
+#include "src/cursor_share.h"
 #include "src/logging.h"
 
 namespace platf {
@@ -206,12 +207,14 @@ namespace platf::dxgi {
 
         return capture_e::error;
       }
+      share_pointer_shape(img_data.data(), img_data.size(), cursor.shape_info);
     }
 
     if (frame_info.LastMouseUpdateTime.QuadPart) {
       cursor.x = frame_info.PointerPosition.Position.x;
       cursor.y = frame_info.PointerPosition.Position.y;
       cursor.visible = frame_info.PointerPosition.Visible;
+      share_pointer_state(frame_info.PointerPosition);
     }
 
     if (frame_update_flag) {
@@ -304,7 +307,8 @@ namespace platf::dxgi {
       img_info.pData = nullptr;
     }
 
-    if (cursor_visible && cursor.visible) {
+    // A client that draws the pointer itself gets the picture without it
+    if (cursor_visible && cursor.visible && !cursor_share::client_draws()) {
       blend_cursor(cursor, *img);
     }
 

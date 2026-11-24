@@ -30,6 +30,7 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE: DWORD {
 #include "display.h"
 #include "misc.h"
 #include "src/config.h"
+#include "src/cursor_share.h"
 #include "src/display_device.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
@@ -40,6 +41,26 @@ namespace platf {
 }
 
 namespace platf::dxgi {
+
+  void share_pointer_shape(const std::uint8_t *data, std::size_t size, const DXGI_OUTDUPL_POINTER_SHAPE_INFO &shape_info) {
+    bool monochrome = shape_info.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME;
+    cursor_share::set_shape((cursor_share::kind_e) shape_info.Type, shape_info.Width,
+                            monochrome ? shape_info.Height / 2 : shape_info.Height, shape_info.Pitch,
+                            shape_info.HotSpot.x, shape_info.HotSpot.y, data, size);
+  }
+
+  void share_pointer_state(const DXGI_OUTDUPL_POINTER_POSITION &position) {
+    // Not on this screen: hidden by an app, or on another screen (the client tells them apart,
+    // so the pointer doesn't blink out while moving from one screen's window to the next)
+    bool shown = position.Visible;
+    if (!shown) {
+      CURSORINFO info {};
+      info.cbSize = sizeof(info);
+      constexpr DWORD cursor_suppressed = 0x00000002;  // CURSOR_SUPPRESSED (touch or pen in use)
+      shown = !GetCursorInfo(&info) || ((info.flags & CURSOR_SHOWING) && !(info.flags & cursor_suppressed));
+    }
+    cursor_share::set_state(position.Visible, shown, position.Position.x, position.Position.y);
+  }
 
   /**
    * DDAPI-specific initialization goes here.

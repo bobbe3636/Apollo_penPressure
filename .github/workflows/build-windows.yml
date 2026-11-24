@@ -49,13 +49,39 @@ jobs:
             mingw-w64-ucrt-x86_64-toolchain
             mingw-w64-ucrt-x86_64-nlohmann-json
 
-      # CMake 4.5 rejects the CMakeLists of Boost 1.89's locale library (source_group: a folder
-      # that is only a text prefix of a file's path), which the build fetches because MSYS2's
-      # Boost is newer than the one Apollo asks for. The last CMake that builds it:
-      - name: CMake 4.4
-        run: >-
-          pacman -U --noconfirm
-          https://repo.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-cmake-4.4.5-1-any.pkg.tar.zst
+      # The exact toolchain of the last known-good build (2026-11-19): every compiler, tool and
+      # library MSYS2 installed for it. MSYS2 updates its packages between builds, and twice in one
+      # week that broke the build on its own (CMake 4.5 rejected Boost's CMake files; OpenSSL 4.1
+      # made structures private). Updating the toolchain is now a change of its own: refresh this
+      # list from the package list in a good build's log. CMake stays at 4.4.5 (4.5 rejects the
+      # Boost 1.89 files the build fetches).
+      - name: Pin toolchain
+        run: |
+          base=https://repo.msys2.org/mingw/ucrt64
+          pacman -U --noconfirm --needed             $base/mingw-w64-ucrt-x86_64-MinHook-1.3.4-2-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-binutils-2.47-4-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-boost-1.92.0-4-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-boost-libs-1.92.0-4-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-brotli-1.2.1-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-bzip2-1.0.8-4-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-cc-libs-16.2.0-7-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-cmake-4.4.5-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-cppdap-1.65.r11.g6464cd7-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-cppwinrt-3.0.260818.1-3-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-crt-14.0.0.r598.ge3d18511f-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-curl-winssl-8.23.0-3-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-expat-2.10.0-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-gcc-16.2.0-7-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-gdb-18.1-4-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-gettext-runtime-1.0-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-gmp-6.3.0-2-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-headers-14.0.0.r598.ge3d18511f-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-icu-78.3-4-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-isl-0.28-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-jsoncpp-1.9.8-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libarchive-3.8.11-3-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libb2-0.98.1-3-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libffi-3.8.1-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libgcc-16.2.0-7-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libgomp-16.2.0-7-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libiconv-1.19.1-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libidn2-2.3.8-5-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libpsl-0.21.5-3-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libquadmath-16.2.0-7-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libssh2-wincng-1.11.1-4-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libstdc++-16.2.0-7-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libsystre-1.0.2-3-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libtre-0.9.0-2-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libunistring-1.4.2-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libuv-1.53.0-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libvpl-2.17.0-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-libwinpthread-14.0.0.r598.ge3d18511f-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-lz4-1.11.1-2-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-miniupnpc-2.3.3-4-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-mpc-1.4.1-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-mpdecimal-4.0.1-3-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-mpfr-4.2.2-3-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-ncurses-6.6-4-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-ninja-1.13.2-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-nlohmann-json-3.12.0-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-nsis-3.13-2-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-openssl-4.1.0-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-opus-1.6.1-2-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-pcre2-10.49-2-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-pkgconf-1~3.0.11-2-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-python-3.14.10-4-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-readline-8.3.003-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-rhash-1.4.6-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-sqlite-3.54.1-2-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-tcl-8.6.18-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-termcap-1.3.1-8-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-tk-8.6.18-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-tzdata-2026f-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-windows-default-manifest-20260815-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-wineditline-2.208-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-winpthreads-14.0.0.r598.ge3d18511f-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-xxhash-0.8.4-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-xz-5.8.4-1-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-zlib-1.4-2-any.pkg.tar.zst \n            $base/mingw-w64-ucrt-x86_64-zstd-1.5.7-2-any.pkg.tar.zst
+
+      # The virtual tablet's own tests, against the real virtual_tablet.cpp: the USB/IP device,
+      # the Wacom driver's handshake, the pen reports (seconds; no driver or tablet needed)
+      - name: Build virtual tablet tests
+        working-directory: tests/virtual_tablet
+        run: g++ -std=gnu++23 -O1 -Wall -Wextra -static -I stub -I ../../src/platform/windows test_vt.cpp -o test_vt.exe -lws2_32
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run virtual tablet tests
+        shell: pwsh
+        working-directory: tests/virtual_tablet
+        run: |
+          $server = Start-Process -FilePath .	est_vt.exe -ArgumentList 'serve','intuos','45' -PassThru -RedirectStandardError serve.log
+          Start-Sleep -Seconds 2
+          python vt_client.py intuos
+          $code = $LASTEXITCODE
+          if (-not $server.HasExited) { Stop-Process -Id $server.Id -Force }
+          Get-Content serve.log
+          exit $code
 
       # Official Node.js, not MSYS2's (see docs/building.md)
       - name: Setup Node.js
@@ -95,7 +121,7 @@ jobs:
           BRANCH: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
           # Upstream 0.4.6 + this fork's changes; without it the build reports 0.0.0
-          BUILD_VERSION: '0.4.10.19'
+          BUILD_VERSION: '0.4.10.20'
         run: |
           export PATH="$PATH:$(cygpath "$NODEJS_PATH")"
           cmake -B build -G Ninja -S . \

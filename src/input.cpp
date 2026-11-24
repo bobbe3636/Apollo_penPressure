@@ -12,7 +12,9 @@ extern "C" {
 #include <bitset>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <list>
+#include <span>
 #include <thread>
 #include <unordered_map>
 
@@ -1593,7 +1595,90 @@ namespace input {
    * @param input The input context pointer.
    * @param input_data The input message.
    */
+  /**
+   * @brief A fixed-size input packet: its declared size and what arrived both hold its structure.
+   * At least that size, not exactly: a newer client may send a longer packet of the same type.
+   */
+  template<typename Packet>
+  bool validate_fixed_input_packet(std::span<const std::uint8_t> packet, std::uint32_t declared_size) {
+    constexpr auto expected_size = static_cast<std::uint32_t>(sizeof(Packet) - sizeof(std::uint32_t));
+    return declared_size >= expected_size && packet.size() >= sizeof(Packet);
+  }
+
+  /**
+   * @brief Check an input packet before anything reads it as its type (from Sunshine's fix for
+   * GHSA-26q2-58j6-qmvv and GHSA-6w33-pjh7-p77c). Its declared size must fit in what arrived, and
+   * hold what its type has. A malformed packet from a paired client could otherwise write past the
+   * batching buffer, or make a paste read past the end of the packet.
+   * @param packet Raw packet bytes.
+   * @param parsed_header The packet's header, copied out when it's there at all.
+   */
+  bool validate_input_packet(std::span<const std::uint8_t> packet, NV_INPUT_HEADER *parsed_header = nullptr) {
+    if (packet.size() < sizeof(NV_INPUT_HEADER)) {
+      return false;
+    }
+
+    NV_INPUT_HEADER header {};
+    std::memcpy(&header, packet.data(), sizeof(header));
+    if (parsed_header) {
+      *parsed_header = header;
+    }
+
+    const auto declared_size = util::endian::big(header.size);
+    if (declared_size < sizeof(header.magic) || declared_size > packet.size() - sizeof(header.size)) {
+      return false;
+    }
+
+    switch (util::endian::little(header.magic)) {
+      case MOUSE_MOVE_REL_MAGIC_GEN5:
+        return validate_fixed_input_packet<NV_REL_MOUSE_MOVE_PACKET>(packet, declared_size);
+      case MOUSE_MOVE_ABS_MAGIC:
+        return validate_fixed_input_packet<NV_ABS_MOUSE_MOVE_PACKET>(packet, declared_size);
+      case MOUSE_BUTTON_DOWN_EVENT_MAGIC_GEN5:
+      case MOUSE_BUTTON_UP_EVENT_MAGIC_GEN5:
+        return validate_fixed_input_packet<NV_MOUSE_BUTTON_PACKET>(packet, declared_size);
+      case SCROLL_MAGIC_GEN5:
+        return validate_fixed_input_packet<NV_SCROLL_PACKET>(packet, declared_size);
+      case SS_HSCROLL_MAGIC:
+        return validate_fixed_input_packet<SS_HSCROLL_PACKET>(packet, declared_size);
+      case KEY_DOWN_EVENT_MAGIC:
+      case KEY_UP_EVENT_MAGIC:
+        return validate_fixed_input_packet<NV_KEYBOARD_PACKET>(packet, declared_size);
+      case UTF8_TEXT_EVENT_MAGIC:
+        return declared_size - sizeof(header.magic) <= UTF8_TEXT_EVENT_MAX_COUNT;
+      case MULTI_CONTROLLER_MAGIC_GEN5:
+        return validate_fixed_input_packet<NV_MULTI_CONTROLLER_PACKET>(packet, declared_size);
+      case SS_TOUCH_MAGIC:
+        return validate_fixed_input_packet<SS_TOUCH_PACKET>(packet, declared_size);
+      case SS_PEN_MAGIC:
+        return validate_fixed_input_packet<SS_PEN_PACKET>(packet, declared_size);
+      case SS_CONTROLLER_ARRIVAL_MAGIC:
+        return validate_fixed_input_packet<SS_CONTROLLER_ARRIVAL_PACKET>(packet, declared_size);
+      case SS_CONTROLLER_TOUCH_MAGIC:
+        return validate_fixed_input_packet<SS_CONTROLLER_TOUCH_PACKET>(packet, declared_size);
+      case SS_CONTROLLER_MOTION_MAGIC:
+        return validate_fixed_input_packet<SS_CONTROLLER_MOTION_PACKET>(packet, declared_size);
+      case SS_CONTROLLER_BATTERY_MAGIC:
+        return validate_fixed_input_packet<SS_CONTROLLER_BATTERY_PACKET>(packet, declared_size);
+      default:
+        return true;  // unknown types are dropped later, unread
+    }
+  }
+
   void passthrough(std::shared_ptr<input_t> &input, std::vector<std::uint8_t> &&input_data, const crypto::PERM& permission) {
+    // Checked before anything reads it, the permission check below included
+    NV_INPUT_HEADER header {};
+    if (!validate_input_packet(input_data, &header)) {
+      static int logged = 0;
+      if (logged < 10) {
+        logged++;
+        BOOST_LOG(warning) << "Dropping a malformed input packet: type ["sv
+                           << util::hex(util::endian::little(header.magic)).to_string_view() << "], declared size ["sv
+                           << util::endian::big(header.size) << "], actual size ["sv << input_data.size() << ']';
+      }
+      return;
+    }
+
     // No input permissions at all
     if (!(permission & crypto::PERM::_all_inputs)) {
       return;

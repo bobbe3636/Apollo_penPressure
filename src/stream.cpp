@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstring>
 #include <cmath>
 #include <fstream>
 #include <future>
@@ -609,7 +610,19 @@ namespace stream {
           {
             net::packet_t packet {event.packet};
 
-            auto type = *(std::uint16_t *) packet->data;
+            // A control message starts with its 2-byte type: a shorter packet was read anyway, and
+            // its length underflowed (GHSA-c428-87f8-rrv5; anyone reaching the port could crash us)
+            if (packet->data == nullptr || packet->dataLength < sizeof(std::uint16_t)) {
+              static int logged = 0;
+              if (logged < 10) {
+                logged++;
+                BOOST_LOG(warning) << "Control: dropping a packet too short for its type ("sv << packet->dataLength << " bytes)"sv;
+              }
+              break;
+            }
+
+            std::uint16_t type;
+            std::memcpy(&type, packet->data, sizeof(type));
             std::string_view payload {(char *) packet->data + sizeof(type), packet->dataLength - sizeof(type)};
 
             call(type, session, payload, false);
@@ -957,7 +970,12 @@ namespace stream {
     });
 
     server->map(packetTypes[IDX_LOSS_STATS], [&](session_t *session, const std::string_view &payload) {
-      int32_t *stats = (int32_t *) payload.data();
+      int32_t stats[4];
+      if (payload.size() < sizeof(stats)) {
+        BOOST_LOG(debug) << "type [IDX_LOSS_STATS]: runt packet"sv;
+        return;
+      }
+      std::memcpy(stats, payload.data(), sizeof(stats));
       auto count = stats[0];
       std::chrono::milliseconds t {stats[1]};
 
@@ -980,7 +998,12 @@ namespace stream {
     });
 
     server->map(packetTypes[IDX_INVALIDATE_REF_FRAMES], [&](session_t *session, const std::string_view &payload) {
-      auto frames = (std::int64_t *) payload.data();
+      std::int64_t frames[2];
+      if (payload.size() < sizeof(frames)) {
+        BOOST_LOG(debug) << "type [IDX_INVALIDATE_REF_FRAMES]: runt packet"sv;
+        return;
+      }
+      std::memcpy(frames, payload.data(), sizeof(frames));
       auto firstFrame = frames[0];
       auto lastFrame = frames[1];
 
@@ -996,8 +1019,19 @@ namespace stream {
     server->map(packetTypes[IDX_INPUT_DATA], [&](session_t *session, const std::string_view &payload) {
       BOOST_LOG(debug) << "type [IDX_INPUT_DATA]"sv;
 
-      auto tagged_cipher_length = util::endian::big(*(int32_t *) payload.data());
-      std::string_view tagged_cipher {payload.data() + sizeof(tagged_cipher_length), (size_t) tagged_cipher_length};
+      // Its length field, then that many bytes: both there (they were read unchecked)
+      std::int32_t length_field;
+      if (payload.size() < sizeof(length_field)) {
+        BOOST_LOG(warning) << "type [IDX_INPUT_DATA]: runt packet"sv;
+        return;
+      }
+      std::memcpy(&length_field, payload.data(), sizeof(length_field));
+      auto tagged_cipher_length = util::endian::big(length_field);
+      if (tagged_cipher_length < 0 || (size_t) tagged_cipher_length > payload.size() - sizeof(length_field)) {
+        BOOST_LOG(warning) << "type [IDX_INPUT_DATA]: packet shorter than its declared length"sv;
+        return;
+      }
+      std::string_view tagged_cipher {payload.data() + sizeof(length_field), (size_t) tagged_cipher_length};
 
       std::vector<uint8_t> plaintext;
 
@@ -1027,6 +1061,9 @@ namespace stream {
         return;
       }
 
+      if (payload.empty()) {
+        return;
+      }
       uint8_t cmdIndex = *(uint8_t*)payload.data();
 
       if (cmdIndex < config::sunshine.server_cmds.size()) {
@@ -1073,6 +1110,13 @@ namespace stream {
     server->map(packetTypes[IDX_ENCRYPTED], [server](session_t *session, const std::string_view &payload) {
       BOOST_LOG(verbose) << "type [IDX_ENCRYPTED]"sv;
 
+      // The header's length and sequence number follow the type (2 bytes, already read)
+      constexpr auto header_after_type = sizeof(control_encrypted_t) - sizeof(std::uint16_t);
+      if (payload.size() < header_after_type) {
+        BOOST_LOG(warning) << "Control: Runt packet"sv;
+        return;
+      }
+
       auto header = (control_encrypted_p) (payload.data() - 2);
 
       auto length = util::endian::little(header->length);
@@ -1084,6 +1128,11 @@ namespace stream {
       }
 
       auto tagged_cipher_length = length - 4;
+      // The declared length must fit in what arrived (it was trusted: a read past the packet)
+      if ((size_t) tagged_cipher_length > payload.size() - header_after_type) {
+        BOOST_LOG(warning) << "Control: packet shorter than its declared length"sv;
+        return;
+      }
       std::string_view tagged_cipher {(char *) header->payload(), (size_t) tagged_cipher_length};
 
       auto &cipher = session->control.cipher;
@@ -1118,7 +1167,13 @@ namespace stream {
         return;
       }
 
-      auto type = *(std::uint16_t *) plaintext.data();
+      if (plaintext.size() < 4) {
+        BOOST_LOG(warning) << "Control: decrypted message too short"sv;
+        return;
+      }
+
+      std::uint16_t type;
+      std::memcpy(&type, plaintext.data(), sizeof(type));
       std::string_view next_payload {(char *) plaintext.data() + 4, plaintext.size() - 4};
 
       if (type == packetTypes[IDX_ENCRYPTED]) {
